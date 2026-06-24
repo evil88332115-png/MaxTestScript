@@ -125,16 +125,20 @@ run_client_test() {
   "${cmd[@]}" 2>"${err_file}" | while IFS= read -r line; do
     printf '%s\n' "${line}" >>"${raw_log}"
     if [[ "${line}" =~ sec[[:space:]]+.+bits/sec ]]; then
+      status="${line}"
+      if [[ "${line}" =~ ([0-9]+(\.[0-9]+)?)-([0-9]+(\.[0-9]+)?)[[:space:]]+sec[[:space:]]+.+[[:space:]]([0-9]+(\.[0-9]+)?)[[:space:]]+([KMGTP]?bits/sec) ]]; then
+        status="${BASH_REMATCH[3]}s ${BASH_REMATCH[5]} ${BASH_REMATCH[7]}"
+      fi
       if [[ -t 1 ]]; then
-        printf '\033[1G\033[2KLatest: %s' "${line:0:112}"
+        printf '\r%-60s' "Latest: ${status}"
       else
-        printf 'Latest: %s\n' "${line:0:112}"
+        printf 'Latest: %s\n' "${status}"
       fi
     fi
   done
   local rc=$?
   if [[ -t 1 ]]; then
-    printf '\033[1G\033[2K'
+    printf '\r%-60s\n' "Client test finished."
   else
     printf '\n'
   fi

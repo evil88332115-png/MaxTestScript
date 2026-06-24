@@ -23,6 +23,7 @@ PACKAGES=(
   gstreamer1.0-tools
   iperf
   iperf3
+  mtr-tiny
   net-tools
   network-manager
   nvme-cli
@@ -53,6 +54,7 @@ REQUIRED_COMMANDS=(
   lsblk
   lsusb
   mount.cifs
+  mtr
   nmcli
   nvme
   python3
