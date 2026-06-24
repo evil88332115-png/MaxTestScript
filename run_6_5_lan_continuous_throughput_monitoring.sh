@@ -105,10 +105,10 @@ prepare_server() {
 }
 
 run_client_test() {
-  local raw_json="$1"
+  local raw_log="$1"
   local raw_text="$2"
   local err_file="${LOG_DIR}/iperf3_stderr.txt"
-  local cmd=(iperf3 -c "${SERVER_IP}" -t "${TEST_DURATION}" -i "${INTERVAL}" -P "${PARALLEL}" -J)
+  local cmd=(iperf3 -c "${SERVER_IP}" -t "${TEST_DURATION}" -i "${INTERVAL}" -P "${PARALLEL}" --forceflush)
 
   if [[ "${REVERSE}" == "1" || "${REVERSE}" == "true" || "${REVERSE}" == "TRUE" ]]; then
     cmd+=(-R)
@@ -116,11 +116,20 @@ run_client_test() {
 
   echo "=== Client test ==="
   echo "Command: ${cmd[*]}"
+  echo "Live status: refreshing one line only. Full log: ${raw_log}"
   echo
 
   set +e
-  "${cmd[@]}" >"${raw_json}" 2>"${err_file}"
+  : >"${raw_log}"
+  : >"${err_file}"
+  "${cmd[@]}" 2>"${err_file}" | while IFS= read -r line; do
+    printf '%s\n' "${line}" >>"${raw_log}"
+    if [[ "${line}" =~ sec[[:space:]]+.+bits/sec ]]; then
+      printf '\r%-120s' "Latest: ${line:0:112}"
+    fi
+  done
   local rc=$?
+  printf '\n'
   set -e
 
   {
@@ -130,8 +139,8 @@ run_client_test() {
     echo "----- stderr -----"
     cat "${err_file}" 2>/dev/null || true
     echo
-    echo "----- json -----"
-    cat "${raw_json}" 2>/dev/null || true
+    echo "----- iperf3 log -----"
+    cat "${raw_log}" 2>/dev/null || true
   } >"${raw_text}"
 
   if [[ "${rc}" -ne 0 ]]; then
@@ -142,17 +151,17 @@ run_client_test() {
 }
 
 analyze_results() {
-  local raw_json="$1"
+  local raw_log="$1"
   local csv_file="$2"
   local png_file="$3"
   local summary_file="$4"
 
-  python3 - "${raw_json}" "${csv_file}" "${png_file}" "${summary_file}" \
+  python3 - "${raw_log}" "${csv_file}" "${png_file}" "${summary_file}" \
     "${THRESHOLD_RATIO}" "${LOW_DURATION}" "${SERVER_IP}" "${TEST_DURATION}" \
     "${INTERVAL}" "${PARALLEL}" "${REVERSE}" <<'PY'
 import csv
-import json
 import os
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -162,7 +171,7 @@ if not os.environ.get("DISPLAY"):
     matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-raw_json = Path(sys.argv[1])
+raw_log = Path(sys.argv[1])
 csv_file = Path(sys.argv[2])
 png_file = Path(sys.argv[3])
 summary_file = Path(sys.argv[4])
@@ -174,15 +183,44 @@ interval = int(float(sys.argv[9]))
 parallel = int(float(sys.argv[10]))
 reverse = sys.argv[11]
 
-data = json.loads(raw_json.read_text(encoding="utf-8", errors="replace"))
+def to_mbps(value, unit):
+    value = float(value)
+    unit = unit.lower()
+    if unit.startswith("k"):
+        return value / 1000.0
+    if unit.startswith("m"):
+        return value
+    if unit.startswith("g"):
+        return value * 1000.0
+    if unit.startswith("t"):
+        return value * 1000.0 * 1000.0
+    return value
+
 throughputs = []
-for item in data.get("intervals", []):
-    summary = item.get("sum") or item.get("sum_sent") or item.get("sum_received")
-    if summary and "bits_per_second" in summary:
-        throughputs.append(float(summary["bits_per_second"]) / 1_000_000.0)
+interval_line = re.compile(
+    r"\]\s+\d+(?:\.\d+)?-\d+(?:\.\d+)?\s+sec\s+"
+    r"[\d.]+\s+\S+Bytes\s+([\d.]+)\s+([KMGTP]?bits/sec)"
+)
+sum_interval_line = re.compile(
+    r"\[SUM\]\s+\d+(?:\.\d+)?-\d+(?:\.\d+)?\s+sec\s+"
+    r"[\d.]+\s+\S+Bytes\s+([\d.]+)\s+([KMGTP]?bits/sec)"
+)
+
+lines = raw_log.read_text(encoding="utf-8", errors="replace").splitlines()
+for line in lines:
+    if "sender" in line or "receiver" in line:
+        continue
+    match = sum_interval_line.search(line)
+    if match:
+        throughputs.append(to_mbps(match.group(1), match.group(2)))
+        continue
+    if parallel == 1:
+        match = interval_line.search(line)
+        if match:
+            throughputs.append(to_mbps(match.group(1), match.group(2)))
 
 if not throughputs:
-    raise SystemExit("ERROR: no interval throughput data found in iperf3 JSON")
+    raise SystemExit("ERROR: no interval throughput data found in iperf3 log")
 
 avg = statistics.mean(throughputs)
 threshold = avg * threshold_ratio
@@ -256,14 +294,14 @@ install_local_tools
 mkdir -p "${LOG_DIR}"
 prepare_server
 
-RAW_JSON="${LOG_DIR}/6-5_lan_throughput_raw.json"
+RAW_LOG="${LOG_DIR}/6-5_lan_throughput_raw.log"
 RAW_TEXT="${LOG_DIR}/6-5_lan_throughput_iperf3.txt"
 CSV_FILE="${LOG_DIR}/6-5_lan_throughput.csv"
 PNG_FILE="${LOG_DIR}/6-5_lan_throughput.png"
 SUMMARY_FILE="${LOG_DIR}/6-5_lan_throughput_summary.json"
 
-if run_client_test "${RAW_JSON}" "${RAW_TEXT}"; then
-  analyze_results "${RAW_JSON}" "${CSV_FILE}" "${PNG_FILE}" "${SUMMARY_FILE}" | tee "${LOG_DIR}/analysis.log"
+if run_client_test "${RAW_LOG}" "${RAW_TEXT}"; then
+  analyze_results "${RAW_LOG}" "${CSV_FILE}" "${PNG_FILE}" "${SUMMARY_FILE}" | tee "${LOG_DIR}/analysis.log"
   echo
   printf '%sRESULT,LAN Continuous Throughput,6-5,PASS%s\n' "${COLOR_RESULT}" "${COLOR_RESET}"
   echo "Artifacts: ${LOG_DIR}"
