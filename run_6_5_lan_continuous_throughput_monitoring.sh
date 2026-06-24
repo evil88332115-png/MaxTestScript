@@ -125,11 +125,19 @@ run_client_test() {
   "${cmd[@]}" 2>"${err_file}" | while IFS= read -r line; do
     printf '%s\n' "${line}" >>"${raw_log}"
     if [[ "${line}" =~ sec[[:space:]]+.+bits/sec ]]; then
-      printf '\r%-120s' "Latest: ${line:0:112}"
+      if [[ -t 1 ]]; then
+        printf '\033[1G\033[2KLatest: %s' "${line:0:112}"
+      else
+        printf 'Latest: %s\n' "${line:0:112}"
+      fi
     fi
   done
   local rc=$?
-  printf '\n'
+  if [[ -t 1 ]]; then
+    printf '\033[1G\033[2K'
+  else
+    printf '\n'
+  fi
   set -e
 
   {
