@@ -17,7 +17,9 @@ fi
 
 PACKAGES=(
   cifs-utils
+  coreutils
   ffmpeg
+  git
   gstreamer1.0-libav
   gstreamer1.0-plugins-bad
   gstreamer1.0-plugins-base
@@ -26,6 +28,8 @@ PACKAGES=(
   gstreamer1.0-tools
   iperf
   iperf3
+  net-tools
+  network-manager
   nvme-cli
   openssh-client
   procps
@@ -34,23 +38,39 @@ PACKAGES=(
   sshpass
   sysbench
   usbutils
+  util-linux
+  wget
+  wput
 )
 
 REQUIRED_COMMANDS=(
+  dd
   ffplay
   ffprobe
+  findmnt
+  git
   gst-launch-1.0
   gst-play-1.0
+  hwclock
+  ifconfig
   iperf
   iperf3
+  lsblk
+  lsusb
   mount.cifs
+  nmcli
   nvme
   python3
   sftp
   ssh
   sshpass
+  sync
   sysbench
+  sysctl
+  timedatectl
   timeout
+  wget
+  wput
 )
 
 JETSON_COMMANDS=(
@@ -113,7 +133,7 @@ verify_commands() {
   done
 
   if command -v gst-inspect-1.0 >/dev/null 2>&1; then
-    for command_name in nvv4l2decoder nv3dsink; do
+    for command_name in nvv4l2decoder nv3dsink nvvidconv; do
       if gst-inspect-1.0 "${command_name}" >/dev/null 2>&1; then
         printf '%s[OK]     GStreamer %-12s available%s\n' \
           "${COLOR_OK}" "${command_name}" "${COLOR_RESET}"

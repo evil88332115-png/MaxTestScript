@@ -10,15 +10,138 @@ SMB_VERSION="${SMB_VERSION:-3.0}"
 EXTRA_OPTIONS="${EXTRA_OPTIONS:-}"
 BOOKMARK_NAME="${BOOKMARK_NAME:-NAS Home}"
 
+PACKAGES=(
+  cifs-utils
+  coreutils
+  ffmpeg
+  git
+  gstreamer1.0-libav
+  gstreamer1.0-plugins-bad
+  gstreamer1.0-plugins-base
+  gstreamer1.0-plugins-good
+  gstreamer1.0-plugins-ugly
+  gstreamer1.0-tools
+  iperf
+  iperf3
+  net-tools
+  network-manager
+  nvme-cli
+  openssh-client
+  procps
+  python3
+  python3-matplotlib
+  sshpass
+  sysbench
+  usbutils
+  util-linux
+  wget
+  wput
+)
+
+REQUIRED_COMMANDS=(
+  dd
+  ffplay
+  ffprobe
+  findmnt
+  git
+  gst-launch-1.0
+  gst-play-1.0
+  hwclock
+  ifconfig
+  iperf
+  iperf3
+  lsblk
+  lsusb
+  mount.cifs
+  nmcli
+  nvme
+  python3
+  sftp
+  ssh
+  sshpass
+  sync
+  sysbench
+  sysctl
+  timedatectl
+  timeout
+  wget
+  wput
+)
+
+JETSON_COMMANDS=(
+  nvgstplayer-1.0
+  tegrastats
+)
+
 install_tools() {
-  if command -v mount.cifs >/dev/null 2>&1; then
-    echo "cifs-utils is already installed."
-    return 0
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "ERROR: apt-get not found. This installer supports Ubuntu/Debian only." >&2
+    exit 1
   fi
 
-  echo "Installing cifs-utils..."
-  sudo apt-get update
-  sudo apt-get install -y cifs-utils
+  local sudo_cmd=()
+  if [[ "$(id -u)" -ne 0 ]]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+      echo "ERROR: sudo not found. Run this script as root." >&2
+      exit 1
+    fi
+    sudo_cmd=(sudo)
+  fi
+
+  echo "Installing/checking all test requirements..."
+  "${sudo_cmd[@]}" apt-get update
+  if [[ "${#sudo_cmd[@]}" -gt 0 ]]; then
+    "${sudo_cmd[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "${PACKAGES[@]}"
+  else
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${PACKAGES[@]}"
+  fi
+}
+
+verify_tools() {
+  local command_name missing=0
+
+  echo
+  echo "=== Requirement check ==="
+  for command_name in "${REQUIRED_COMMANDS[@]}"; do
+    if command -v "${command_name}" >/dev/null 2>&1; then
+      printf '[OK]      %-18s %s\n' "${command_name}" "$(command -v "${command_name}")"
+    else
+      printf '[MISSING] %s\n' "${command_name}"
+      missing=1
+    fi
+  done
+
+  echo
+  echo "=== Jetson / JetPack component check ==="
+  for command_name in "${JETSON_COMMANDS[@]}"; do
+    if command -v "${command_name}" >/dev/null 2>&1; then
+      printf '[OK]      %-18s %s\n' "${command_name}" "$(command -v "${command_name}")"
+    else
+      printf '[WARNING] %-18s not found; Jetson multimedia/thermal tests may fail.\n' "${command_name}"
+    fi
+  done
+
+  if command -v gst-inspect-1.0 >/dev/null 2>&1; then
+    for command_name in nvv4l2decoder nv3dsink nvvidconv; do
+      if gst-inspect-1.0 "${command_name}" >/dev/null 2>&1; then
+        printf '[OK]      GStreamer %-10s available\n' "${command_name}"
+      else
+        printf '[WARNING] GStreamer %-10s not found; NVIDIA accelerated playback tests may fail.\n' "${command_name}"
+      fi
+    done
+  fi
+
+  if python3 -c 'import matplotlib' >/dev/null 2>&1; then
+    echo "[OK]      Python matplotlib available"
+  else
+    echo "[MISSING] Python matplotlib"
+    missing=1
+  fi
+
+  if [[ "${missing}" -ne 0 ]]; then
+    echo "ERROR: Some required commands are still missing after installation." >&2
+    exit 1
+  fi
 }
 
 mount_nas() {
@@ -87,6 +210,7 @@ echo "Date: $(date --iso-8601=seconds)"
 echo
 
 install_tools
+verify_tools
 mount_nas
 verify_mount
 add_file_manager_bookmark

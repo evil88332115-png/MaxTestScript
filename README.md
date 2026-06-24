@@ -15,9 +15,11 @@ This repository is intended to be copied to a Jetson target and run locally from
 Install common requirements first:
 
 ```bash
-chmod +x run_1_requirement.sh
-./run_1_requirement.sh
+chmod +x run_0_mount_nas.sh
+./run_0_mount_nas.sh
 ```
+
+`run_0_mount_nas.sh` installs/checks the shared dependencies used by the test scripts, then mounts the NAS test-data share.
 
 ## Basic usage
 
@@ -25,7 +27,7 @@ chmod +x run_1_requirement.sh
 git clone https://github.com/evil88332115-png/MaxTestScript.git
 cd MaxTestScript
 chmod +x *.sh
-./run_1_requirement.sh
+./run_0_mount_nas.sh
 ```
 
 Then run the required test script directly:
@@ -44,8 +46,8 @@ Some scripts are interactive and may ask for interface selection, server IP, pas
 
 | Script | Purpose |
 | --- | --- |
-| `run_0_mount_nas.sh` | Mount NAS share for test media files |
-| `run_1_requirement.sh` | Install/check common test dependencies |
+| `run_0_mount_nas.sh` | Install/check common test dependencies and mount NAS share for test media files |
+| `run_1_requirement.sh` | Install/check common test dependencies only |
 | `check.sh` | General check script |
 
 ### System / storage / network
@@ -94,4 +96,3 @@ Some scripts are interactive and may ask for interface selection, server IP, pas
 - `run_5_11_network_interface_initialization.sh` includes normal and low-level LAN/Wi-Fi modes. Use the low-level modes only when validating LED/UI behavior.
 - Multimedia tests may depend on NAS paths such as `/mnt/nas_home/TEST FILE/...`. Mount NAS before running those tests.
 - Jetson multimedia tests require NVIDIA GStreamer components such as `nvv4l2decoder`, `nv3dsink`, and `nvgstplayer-1.0`.
-
