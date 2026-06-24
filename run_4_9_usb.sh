@@ -30,6 +30,33 @@ run_dd() {
   echo
 }
 
+unmount_usb_mount() {
+  local mount_path="$1"
+  local source=""
+
+  source="$(findmnt -rn -o SOURCE --mountpoint "${mount_path}" 2>/dev/null | head -n 1 || true)"
+
+  echo "=== Unmount USB ==="
+  echo "Mount path: ${mount_path}"
+  if [[ -n "${source}" ]]; then
+    echo "Source: ${source}"
+  fi
+  echo "Command: sync"
+  sync
+  echo "Command: sudo umount ${mount_path}"
+  sudo umount "${mount_path}"
+
+  if findmnt -rn --mountpoint "${mount_path}" >/dev/null 2>&1; then
+    echo "ERROR: USB mount is still mounted: ${mount_path}"
+    printf 'RESULT,USB Unmount,%s,FAIL\n' "${mount_path}"
+    return 1
+  fi
+
+  echo "USB has been unmounted: ${mount_path}"
+  printf 'RESULT,USB Unmount,%s,PASS\n' "${mount_path}"
+  echo
+}
+
 find_usb_mounts() {
   findmnt -rn -o TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL \
     | awk '$1 ~ "^/media/" { print }'
@@ -99,6 +126,7 @@ run_usb_test_once() {
   echo
 
   run_dd "Read" sudo dd "if=${test_file}" of=/dev/null "bs=${BLOCK_SIZE}"
+  unmount_usb_mount "${mount_path}"
 }
 
 echo "4.9 USB Storage dd test"
@@ -113,7 +141,7 @@ echo
 
 while true; do
   run_usb_test_once
-  echo "Please move the USB storage device to the next USB port, wait until it is mounted, then run this script again or continue here."
+  echo "Please move the USB storage device to the next USB port, wait until it is mounted, then continue here."
   echo
 
   if [[ ! -t 0 ]]; then

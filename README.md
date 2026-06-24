@@ -73,6 +73,7 @@ Some scripts are interactive and may ask for interface selection, server IP, pas
 | `run_4_21_audio_decode.sh` | Audio decode playback test |
 | `run_4_23_video_decode.sh` | Video decode playback test |
 | `run_4_24_reader_container_formats.sh` | Container format read/playback test |
+| `run_6_3_stress_test_via_online_streaming_playback.sh` | Online streaming playback stress test with one-line FPS/system status |
 | `run_5_7_fps.sh` | FPS/video playback test |
 | `run_5_8_video_bit_rate.sh` | Video bitrate playback test |
 | `run_5_9_vertical_multimedia.sh` | Vertical 1080x1920 playback and rotation test |
