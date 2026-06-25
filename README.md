@@ -54,6 +54,7 @@ Some scripts are interactive and may ask for interface selection, server IP, pas
 
 | Script | Purpose |
 | --- | --- |
+| `run_4_5_resolution.sh` | Auto-detect and switch display resolutions from largest to smallest, then back to largest |
 | `run_4_6_CPU.sh` | Print CPU online/present/possible/max frequency information |
 | `run_4_7_memory.sh` | Memory test |
 | `run_4_8_nvme.sh` | NVMe test |
@@ -66,6 +67,7 @@ Some scripts are interactive and may ask for interface selection, server IP, pas
 | `run_6_5_lan_continuous_throughput_monitoring.sh` | Continuous LAN throughput monitoring |
 | `run_6_6_network_monitor_packet_loss_rate.sh` | Continuous packet loss and latency monitoring using mtr |
 | `run_6_7_maximum_storage_utilization_test.sh` | Fill root filesystem with dd while leaving reserved free space |
+| `run_6_9_system_stress_test.sh` | System stress menu using glmark2, glxgears, memtester, and bonnie++ |
 
 ### Multimedia
 
@@ -92,6 +94,7 @@ Some scripts are interactive and may ask for interface selection, server IP, pas
 | `run_7_4_USB.sh` | Auto-detected USB storage dd read/write test |
 | `run_7_5_graphics_engine.sh` | Graphics engine benchmark using glmark2 and GravityMark |
 | `run_7_6_iperf2_network_bandwidth_test.sh` | iperf2 network bandwidth test with CSV/PNG/PDF report |
+| `run_8_1_emmc_internal_storage.sh` | eMMC/internal storage loop write stress test |
 | `run_8_3_client_net_security_test.sh` | Client network security/reliability test using ping, HTTP request, and iperf3 |
 
 ## Notes
