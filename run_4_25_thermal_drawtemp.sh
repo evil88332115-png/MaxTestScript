@@ -1,23 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ============================================================
+# 4-25 Thermal test with drawtemp
+#
+# Playback source:
+#   1. Download/copy NAS video to local, then play local file
+#   2. Direct playback from same NAS video path, without local copy
+#
+# Playback engine:
+#   Fixed GStreamer hardware decode pipeline:
+#     H.264/H.265/VP9/AV1 -> nvv4l2decoder -> nvvidconv -> nv3dsink
+#
+# Output:
+#   ~/4-25_thermal_YYYYMMDD_HHMMSS/
+#     tegrastats.log
+#     gst_playback.log
+#     4-25_thermal.csv
+#     4-25_thermal.png   (CPU+GPU only)
+#     summary.txt
+# ============================================================
+
 NAS_VIDEO="${NAS_VIDEO:-/mnt/nas_home/TestVideo.mp4}"
 VIDEO_DEST="${VIDEO_DEST:-${HOME}/TestVideo.mp4}"
 LOG_DIR="${LOG_DIR:-${HOME}/4-25_thermal_$(date +%Y%m%d_%H%M%S)}"
 DURATION="${DURATION:-30m}"
 TEGRATS_INTERVAL_MS="${TEGRATS_INTERVAL_MS:-1000}"
-PLAYER="${PLAYER:-nvgstplayer-1.0}"
+DISPLAY_SYNC="${DISPLAY_SYNC:-true}"
+FORCE_FULLSCREEN="${FORCE_FULLSCREEN:-true}"
+STOP_REQUESTED=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRAW_TEMP_SCRIPT="${DRAW_TEMP_SCRIPT:-${SCRIPT_DIR}/drawtempcurve_auto.py}"
-DRAW_TEMP_MODE="${DRAW_TEMP_MODE:-cpu_gpu}"
+DRAW_TEMP_MODE="cpu_gpu"
 DRAW_TEMP_AVG_MIN="${DRAW_TEMP_AVG_MIN:-0}"
 export DISPLAY="${DISPLAY:-:0}"
-SCRIPT_PID="$$"
-
-file_uri() {
-  local path="$1"
-  printf 'file://%s' "${path}"
-}
 
 if [[ -t 1 ]]; then
   COLOR_ERROR=$'\033[1;31m'
@@ -31,125 +47,203 @@ else
   COLOR_RESET=""
 fi
 
+print_warn() { printf '%s%s%s\n' "${COLOR_WARN}" "$*" "${COLOR_RESET}"; }
+print_error() { printf '%s%s%s\n' "${COLOR_ERROR}" "$*" "${COLOR_RESET}"; }
+print_result() { printf '%s%s%s\n' "${COLOR_RESULT}" "$*" "${COLOR_RESET}"; }
+
 cleanup() {
+  STOP_REQUESTED=true
+  if [[ -n "${GST_PID:-}" ]] && kill -0 "${GST_PID}" 2>/dev/null; then
+    kill -INT "${GST_PID}" 2>/dev/null || true
+    sleep 1
+    kill -TERM "${GST_PID}" 2>/dev/null || true
+  fi
   if [[ -n "${TEGRATS_PID:-}" ]] && kill -0 "${TEGRATS_PID}" 2>/dev/null; then
     kill -INT "${TEGRATS_PID}" 2>/dev/null || true
-    wait "${TEGRATS_PID}" 2>/dev/null || true
-  fi
-  if [[ -n "${WATCHDOG_PID:-}" ]] && kill -0 "${WATCHDOG_PID}" 2>/dev/null; then
-    kill "${WATCHDOG_PID}" 2>/dev/null || true
-    wait "${WATCHDOG_PID}" 2>/dev/null || true
   fi
 }
-trap cleanup INT TERM
+handle_interrupt() {
+  echo ""
+  echo "Stop requested. Stopping playback and finishing current logs..."
+  cleanup
+}
+trap handle_interrupt INT TERM
 
-echo "4.25 Thermal test"
-echo "Host: $(hostname)"
-echo "Date: $(date --iso-8601=seconds)"
-echo "NAS video: ${NAS_VIDEO}"
-echo "Local video: ${VIDEO_DEST}"
-echo "Duration: ${DURATION}"
-echo "Log directory: ${LOG_DIR}"
-echo
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "ERROR: required command not found: $cmd" >&2
+    exit 1
+  fi
+}
 
-if [[ ! -f "${NAS_VIDEO}" ]]; then
-  echo "ERROR: NAS video not found: ${NAS_VIDEO}" >&2
-  echo "Please mount NAS first, for example: ${HOME}/run_0_mount_nas.sh" >&2
-  exit 1
-fi
+file_uri() {
+  local path="$1"
+  printf 'file://%s' "${path}"
+}
 
-if ! command -v timeout >/dev/null 2>&1; then
-  echo "ERROR: timeout not found." >&2
-  exit 1
-fi
+print_command() {
+  echo ""
+  echo "Command:"
+  printf '  '
+  printf '%q ' "$@"
+  echo ""
+  echo ""
+}
 
-if ! command -v "${PLAYER}" >/dev/null 2>&1; then
-  echo "ERROR: ${PLAYER} not found." >&2
-  exit 1
-fi
+set_gst_window_fullscreen() {
+  local gst_pid="$1"
+  local win_id=""
+  local deadline
 
-if ! command -v tegrastats >/dev/null 2>&1; then
-  echo "ERROR: tegrastats not found." >&2
-  exit 1
-fi
+  [[ "$FORCE_FULLSCREEN" == "true" ]] || return 0
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "ERROR: python3 not found." >&2
-  exit 1
-fi
+  if ! command -v wmctrl >/dev/null 2>&1 || ! command -v xdotool >/dev/null 2>&1; then
+    echo "WARNING: wmctrl/xdotool not found; cannot force borderless fullscreen." >>"${PLAYER_LOG}"
+    echo "Install with: sudo apt-get install -y wmctrl xdotool" >>"${PLAYER_LOG}"
+    return 0
+  fi
 
-mkdir -p "${LOG_DIR}"
+  deadline=$(($(date +%s) + 10))
+  while [[ "$(date +%s)" -lt "$deadline" ]]; do
+    win_id="$(xdotool search --onlyvisible --pid "$gst_pid" 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$win_id" ]]; then
+      break
+    fi
+    sleep 0.5
+  done
 
-if [[ -f "${VIDEO_DEST}" ]] && [[ "$(stat -c %s "${VIDEO_DEST}")" == "$(stat -c %s "${NAS_VIDEO}")" ]]; then
-  echo "Local test video already exists; skipping copy."
-else
-  echo "Copying test video from NAS..."
-  cp -f "${NAS_VIDEO}" "${VIDEO_DEST}"
-  sync "${VIDEO_DEST}" || true
-fi
-ls -lh "${VIDEO_DEST}"
-echo
+  if [[ -z "$win_id" ]]; then
+    win_id="$(wmctrl -lp 2>/dev/null | awk -v pid="$gst_pid" '$3 == pid { print $1; exit }' || true)"
+  fi
 
-TEGRATS_LOG="${LOG_DIR}/tegrastats.log"
-PLAYER_LOG="${LOG_DIR}/nvgstplayer.log"
-CSV_FILE="${LOG_DIR}/4-25_thermal.csv"
-PNG_FILE="${LOG_DIR}/4-25_thermal.png"
-SVG_FILE="${LOG_DIR}/4-25_thermal.svg"
-SUMMARY_FILE="${LOG_DIR}/summary.txt"
+  if [[ -n "$win_id" ]]; then
+    echo "Force fullscreen window id: $win_id" >>"${PLAYER_LOG}"
+    wmctrl -ir "$win_id" -b add,fullscreen >>"${PLAYER_LOG}" 2>&1 || true
+    xdotool windowactivate "$win_id" >>"${PLAYER_LOG}" 2>&1 || true
+  else
+    echo "WARNING: cannot find GStreamer window for fullscreen." >>"${PLAYER_LOG}"
+  fi
+}
 
-echo "Starting tegrastats and video playback..."
-echo "tegrastats log: ${TEGRATS_LOG}"
-echo "player log: ${PLAYER_LOG}"
-echo "DISPLAY: ${DISPLAY:-not set}"
-echo
+duration_to_seconds() {
+  local value="$1"
+  case "$value" in
+    *s) echo "${value%s}" ;;
+    *m) echo "$((${value%m} * 60))" ;;
+    *h) echo "$((${value%h} * 3600))" ;;
+    *[!0-9]*)
+      echo "ERROR: unsupported DURATION format: $value" >&2
+      echo "Use integer seconds, or suffix s/m/h, for example 1800, 30m, 1h." >&2
+      return 1
+      ;;
+    *) echo "$value" ;;
+  esac
+}
 
-set +e
-timeout "${DURATION}" tegrastats --interval "${TEGRATS_INTERVAL_MS}" >"${TEGRATS_LOG}" 2>&1 &
-TEGRATS_PID=$!
+probe_video_codec() {
+  ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$1" 2>/dev/null | head -n 1 || true
+}
 
-cd "${HOME}" || exit 1
-{
-  echo "Date: $(date --iso-8601=seconds)"
-  echo "Command: ${PLAYER} -i $(file_uri "${VIDEO_DEST}") --loop-forever"
-  echo "DISPLAY: ${DISPLAY:-not set}"
-  echo "Note: --loop-forever keeps the video playing; background timer stops it after ${DURATION}."
-} >"${PLAYER_LOG}"
+probe_audio_codec() {
+  ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$1" 2>/dev/null | head -n 1 || true
+}
 
-(
-  sleep "${DURATION}"
-  pkill -INT -u "$(id -u)" -x "${PLAYER}" 2>/dev/null || true
-) &
-WATCHDOG_PID=$!
+probe_format() {
+  ffprobe -v error -show_entries format=format_name -of default=nw=1:nk=1 "$1" 2>/dev/null | head -n 1 || true
+}
 
-"${PLAYER}" -i "$(file_uri "${VIDEO_DEST}")" --loop-forever
-PLAYER_RC=$?
+get_parser() {
+  case "$1" in
+    h264) echo "h264parse" ;;
+    hevc|h265) echo "h265parse" ;;
+    vp9) gst-inspect-1.0 vp9parse >/dev/null 2>&1 && echo "vp9parse" || echo "" ;;
+    av1) gst-inspect-1.0 av1parse >/dev/null 2>&1 && echo "av1parse" || echo "" ;;
+    *) echo "" ;;
+  esac
+}
 
-if kill -0 "${WATCHDOG_PID}" 2>/dev/null; then
-  kill "${WATCHDOG_PID}" 2>/dev/null || true
-  wait "${WATCHDOG_PID}" 2>/dev/null || true
-fi
+get_demux() {
+  local source="$1" format="${2:-}" lower
+  lower="$(echo "$source" | tr '[:upper:]' '[:lower:]')"
+  if echo "$format" | grep -qiE 'mpegts'; then echo "tsdemux"; return; fi
+  if echo "$format" | grep -qiE 'matroska|webm'; then echo "matroskademux"; return; fi
+  if echo "$format" | grep -qiE 'mov|mp4|m4a|3gp|3g2|mj2'; then echo "qtdemux"; return; fi
+  case "$lower" in
+    *.mp4|*.m4v|*.mov|*.3gp) echo "qtdemux" ;;
+    *.mkv|*.webm) echo "matroskademux" ;;
+    *.m2ts|*.mts|*.ts) echo "tsdemux" ;;
+    *) echo "" ;;
+  esac
+}
 
-{
-  echo
-  echo "Player exit code: ${PLAYER_RC}"
-  echo "End date: $(date --iso-8601=seconds)"
-} >>"${PLAYER_LOG}"
+select_source_mode() {
+  local choice input
+  echo ""
+  echo "Playback source mode:"
+  echo "1) Download/copy NAS video to local and play local file"
+  echo "2) Direct playback from same NAS video path, no local copy"
+  read -r -p "Select [1/2]: " choice
 
-if [[ "${PLAYER_RC}" -ne 124 ]] && kill -0 "${TEGRATS_PID}" 2>/dev/null; then
-  kill -INT "${TEGRATS_PID}" 2>/dev/null || true
-fi
-if kill -0 "${TEGRATS_PID}" 2>/dev/null; then
-  wait "${TEGRATS_PID}"
-else
-  wait "${TEGRATS_PID}" 2>/dev/null
-fi
-TEGRATS_RC=$?
-set -e
+  case "$choice" in
+    2)
+      SOURCE_MODE="nas_direct"
+      echo "NAS video: $NAS_VIDEO"
+      if [[ ! -f "$NAS_VIDEO" ]]; then
+        echo "ERROR: NAS video not found: $NAS_VIDEO" >&2
+        echo "Please mount NAS first and put TestVideo.mp4 at the expected path." >&2
+        exit 1
+      fi
+      ls -lh "$NAS_VIDEO"
+      SOURCE="$NAS_VIDEO"
+      SOURCE_LABEL="$NAS_VIDEO"
+      ;;
+    *)
+      SOURCE_MODE="local"
+      echo "NAS video: $NAS_VIDEO"
+      echo "Local video: $VIDEO_DEST"
+      if [[ ! -f "$NAS_VIDEO" ]]; then
+        echo "ERROR: NAS video not found: $NAS_VIDEO" >&2
+        echo "Please mount NAS first and put TestVideo.mp4 at the expected path." >&2
+        exit 1
+      fi
+      if [[ -f "$VIDEO_DEST" ]] && [[ "$(stat -c %s "$VIDEO_DEST")" == "$(stat -c %s "$NAS_VIDEO")" ]]; then
+        echo "Local test video already exists; skipping copy."
+      else
+        echo "Copying test video from NAS to local..."
+        cp -f "$NAS_VIDEO" "$VIDEO_DEST"
+        sync "$VIDEO_DEST" || true
+      fi
+      ls -lh "$VIDEO_DEST"
+      SOURCE="$VIDEO_DEST"
+      SOURCE_LABEL="$VIDEO_DEST"
+      ;;
+  esac
+}
 
-trap - INT TERM
+build_gst_command() {
+  local source="$1" mode="$2" codec="$3" format="$4"
+  local parser demux source_element source_prop
 
-echo "Parsing tegrastats temperature data..."
-python3 - "${TEGRATS_LOG}" "${CSV_FILE}" "${TEGRATS_INTERVAL_MS}" <<'PYCSV'
+  parser="$(get_parser "$codec")"
+  demux="$(get_demux "$source" "$format")"
+
+  [[ -n "$parser" ]] || { echo "ERROR: unsupported codec for fixed HW pipeline: $codec" >&2; return 1; }
+  [[ -n "$demux" ]] || { echo "ERROR: unsupported container/demuxer: $format" >&2; return 1; }
+
+  source_element="filesrc"
+  source_prop="location=$source"
+
+  GST_CMD=(
+    gst-launch-1.0 -e
+    "$source_element" "$source_prop" !
+    "$demux" name=demux
+    demux.video_0 ! queue ! "$parser" ! nvv4l2decoder ! nvvidconv ! nv3dsink sync="$DISPLAY_SYNC"
+  )
+}
+
+parse_tegrastats_csv() {
+  python3 - "${TEGRATS_LOG}" "${CSV_FILE}" "${TEGRATS_INTERVAL_MS}" <<'PYCSV'
 import csv
 import re
 import sys
@@ -190,6 +284,129 @@ print(f"CSV: {csv_file}")
 print(f"Samples: {len(rows)}")
 print(f"Sensors: {', '.join(sensors) if sensors else 'none'}")
 PYCSV
+}
+
+echo "4.25 Thermal test"
+echo "Host: $(hostname)"
+echo "Date: $(date --iso-8601=seconds)"
+echo "Duration: ${DURATION}"
+echo "Log directory: ${LOG_DIR}"
+echo "Display sync: ${DISPLAY_SYNC}"
+echo "Force fullscreen: ${FORCE_FULLSCREEN}"
+echo
+
+require_cmd timeout
+require_cmd gst-launch-1.0
+require_cmd gst-inspect-1.0
+require_cmd ffprobe
+require_cmd tegrastats
+require_cmd python3
+
+select_source_mode
+
+VIDEO_CODEC="$(probe_video_codec "$SOURCE")"
+AUDIO_CODEC="$(probe_audio_codec "$SOURCE")"
+FORMAT_NAME="$(probe_format "$SOURCE")"
+VIDEO_CODEC="${VIDEO_CODEC:-}"
+AUDIO_CODEC="${AUDIO_CODEC:-none}"
+FORMAT_NAME="${FORMAT_NAME:-unknown}"
+
+echo ""
+echo "Source mode: $SOURCE_MODE"
+echo "Source: $SOURCE_LABEL"
+echo "Format: $FORMAT_NAME"
+echo "Video codec: $VIDEO_CODEC"
+echo "Audio codec: $AUDIO_CODEC"
+
+mkdir -p "$LOG_DIR"
+
+TEGRATS_LOG="${LOG_DIR}/tegrastats.log"
+PLAYER_LOG="${LOG_DIR}/gst_playback.log"
+CSV_FILE="${LOG_DIR}/4-25_thermal.csv"
+PNG_FILE="${LOG_DIR}/4-25_thermal.png"
+SUMMARY_FILE="${LOG_DIR}/summary.txt"
+
+build_gst_command "$SOURCE" "$SOURCE_MODE" "$VIDEO_CODEC" "$FORMAT_NAME"
+
+echo ""
+echo "Starting tegrastats and hardware decode playback..."
+echo "tegrastats log: ${TEGRATS_LOG}"
+echo "playback log: ${PLAYER_LOG}"
+echo "DISPLAY: ${DISPLAY:-not set}"
+print_command "${GST_CMD[@]}"
+
+set +e
+timeout "${DURATION}" tegrastats --interval "${TEGRATS_INTERVAL_MS}" >"${TEGRATS_LOG}" 2>&1 &
+TEGRATS_PID=$!
+
+DURATION_SECONDS="$(duration_to_seconds "$DURATION")"
+END_TS=$(($(date +%s) + DURATION_SECONDS))
+PLAYER_RC=0
+PLAY_LOOP_COUNT=0
+
+{
+  echo "Date: $(date --iso-8601=seconds)"
+  echo "Duration: ${DURATION} (${DURATION_SECONDS} seconds)"
+  echo "Command: ${GST_CMD[*]}"
+  echo "Note: gst-launch plays one file once; this script loops it until duration is reached."
+  echo
+} >"${PLAYER_LOG}"
+
+while true; do
+  if [[ "$STOP_REQUESTED" == "true" ]]; then
+    break
+  fi
+
+  NOW_TS="$(date +%s)"
+  REMAINING_SECONDS=$((END_TS - NOW_TS))
+  if [[ "${REMAINING_SECONDS}" -le 0 ]]; then
+    break
+  fi
+
+  PLAY_LOOP_COUNT=$((PLAY_LOOP_COUNT + 1))
+  {
+    echo
+    echo "===== Playback loop ${PLAY_LOOP_COUNT} start: $(date --iso-8601=seconds), remaining=${REMAINING_SECONDS}s ====="
+  } >>"${PLAYER_LOG}"
+
+  timeout "${REMAINING_SECONDS}s" "${GST_CMD[@]}" >>"${PLAYER_LOG}" 2>&1 &
+  GST_PID=$!
+  set_gst_window_fullscreen "$GST_PID"
+  wait "$GST_PID"
+  LOOP_RC=$?
+
+  if [[ "$STOP_REQUESTED" == "true" ]]; then
+    PLAYER_RC=130
+    break
+  fi
+
+  {
+    echo "===== Playback loop ${PLAY_LOOP_COUNT} end: $(date --iso-8601=seconds), rc=${LOOP_RC} ====="
+  } >>"${PLAYER_LOG}"
+
+  if [[ "${LOOP_RC}" -eq 124 || "${LOOP_RC}" -eq 130 ]]; then
+    PLAYER_RC=0
+    break
+  fi
+
+  if [[ "${LOOP_RC}" -ne 0 ]]; then
+    PLAYER_RC="${LOOP_RC}"
+    break
+  fi
+done
+
+if kill -0 "${TEGRATS_PID}" 2>/dev/null; then
+  kill -INT "${TEGRATS_PID}" 2>/dev/null || true
+fi
+wait "${TEGRATS_PID}" 2>/dev/null
+TEGRATS_RC=$?
+set -e
+
+trap - INT TERM
+
+echo ""
+echo "Parsing tegrastats temperature data..."
+parse_tegrastats_csv
 
 if [[ ! -f "${DRAW_TEMP_SCRIPT}" ]]; then
   echo "ERROR: drawtemp script not found: ${DRAW_TEMP_SCRIPT}" >&2
@@ -197,9 +414,7 @@ if [[ ! -f "${DRAW_TEMP_SCRIPT}" ]]; then
   exit 1
 fi
 
-echo "Drawing temperature curve with drawtemp..."
-echo "Draw mode: ${DRAW_TEMP_MODE}"
-echo "Average interval: ${DRAW_TEMP_AVG_MIN} min"
+echo "Drawing CPU+GPU temperature curve with drawtemp..."
 python3 "${DRAW_TEMP_SCRIPT}" \
   --file "${TEGRATS_LOG}" \
   --mode "${DRAW_TEMP_MODE}" \
@@ -212,28 +427,33 @@ python3 "${DRAW_TEMP_SCRIPT}" \
   echo "Host: $(hostname)"
   echo "Date: $(date --iso-8601=seconds)"
   echo "Duration: ${DURATION}"
-  echo "NAS video: ${NAS_VIDEO}"
-  echo "Local video: ${VIDEO_DEST}"
-  echo "Player command: ${PLAYER} -i $(file_uri "${VIDEO_DEST}") --loop-forever"
-  echo "Player watchdog: sleep ${DURATION}; pkill -INT -x ${PLAYER}"
+  echo "Source mode: ${SOURCE_MODE}"
+  echo "Source: ${SOURCE_LABEL}"
+  echo "Format: ${FORMAT_NAME}"
+  echo "Video codec: ${VIDEO_CODEC}"
+  echo "Audio codec: ${AUDIO_CODEC}"
+  echo "GStreamer command: ${GST_CMD[*]}"
+  echo "Playback loops: ${PLAY_LOOP_COUNT}"
+  echo "Stop requested: ${STOP_REQUESTED}"
   echo "Tegrastats command: timeout ${DURATION} tegrastats --interval ${TEGRATS_INTERVAL_MS}"
-  echo "Player exit code: ${PLAYER_RC}"
+  echo "Playback exit code: ${PLAYER_RC}"
   echo "Tegrastats exit code: ${TEGRATS_RC}"
   echo "Tegrastats log: ${TEGRATS_LOG}"
-  echo "Player log: ${PLAYER_LOG}"
+  echo "Playback log: ${PLAYER_LOG}"
   echo "CSV: ${CSV_FILE}"
   echo "PNG: ${PNG_FILE}"
-  echo "SVG: ${SVG_FILE}"
 } >"${SUMMARY_FILE}"
 
 echo
 cat "${SUMMARY_FILE}"
 echo
 
-if [[ "${TEGRATS_RC}" -eq 124 ]]; then
-  printf '%sRESULT,Thermal,4-25,PASS%s\n' "${COLOR_RESULT}" "${COLOR_RESET}"
+if [[ "${PLAYER_RC}" -eq 0 || "${PLAYER_RC}" -eq 130 || "${PLAYER_RC}" -eq 124 ]]; then
+  print_result "RESULT,Thermal,4-25,PASS"
 else
-  printf '%sRESULT,Thermal,4-25,FAIL,player_rc=%s,tegrastats_rc=%s%s\n' "${COLOR_ERROR}" "${PLAYER_RC}" "${TEGRATS_RC}" "${COLOR_RESET}"
+  print_error "RESULT,Thermal,4-25,FAIL,player_rc=${PLAYER_RC},tegrastats_rc=${TEGRATS_RC}"
+  echo "Last 40 playback log lines:"
+  tail -n 40 "$PLAYER_LOG" || true
   exit 1
 fi
 

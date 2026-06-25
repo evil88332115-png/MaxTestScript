@@ -12,7 +12,8 @@ set -u
 #   5. Play URL with hardware decode pipeline
 #   6. Print FPS/system status on one refreshing line only
 #
-# Stop stress test with Ctrl+C.
+# Test stops when the requested duration is reached.
+# Ctrl+C also stops test and still attempts to draw the temperature curve.
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -26,6 +27,13 @@ DISPLAY_SYNC="${DISPLAY_SYNC:-true}"
 STATS_PLATFORM="${STATS_PLATFORM:-auto}"
 LOOP_FOREVER="${LOOP_FOREVER:-true}"
 STATUS_WIDTH="${STATUS_WIDTH:-78}"
+TEST_DURATION_SECONDS="${TEST_DURATION_SECONDS:-}"
+AVG_INTERVAL_MIN="${AVG_INTERVAL_MIN:-}"
+RESULT_DIR=""
+TEGRASTATS_LOG=""
+TEGRASTATS_PID=""
+TEST_END_TS=0
+TEST_TIME_UP=false
 
 SERVER_HOST=""
 SERVER_USER=""
@@ -49,6 +57,79 @@ print_warn() { echo -e "${YELLOW}$1${NC}" >&2; }
 print_hwdecode() { echo -e "${GREEN}[HW Decode] $1${NC}"; }
 print_swdecode() { echo -e "${RED}[SW Decode / Fallback] $1${NC}"; }
 
+cleanup_tegrastats() {
+    if [ -n "${TEGRASTATS_PID:-}" ] && kill -0 "$TEGRASTATS_PID" >/dev/null 2>&1; then
+        kill "$TEGRASTATS_PID" >/dev/null 2>&1 || true
+        wait "$TEGRASTATS_PID" >/dev/null 2>&1 || true
+    fi
+    TEGRASTATS_PID=""
+}
+
+draw_temperature_curve() {
+    local out_png
+
+    [ -n "$TEGRASTATS_LOG" ] || return 0
+    [ -s "$TEGRASTATS_LOG" ] || {
+        echo "WARNING: tegrastats log is empty, skip drawing."
+        return 0
+    }
+
+    out_png="${RESULT_DIR}/tegrastats_cpu_gpu.png"
+    echo ""
+    echo "Drawing CPU+GPU temperature curve..."
+    echo "Input: $TEGRASTATS_LOG"
+    echo "Output: $out_png"
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "ERROR: python3 not found. Cannot draw temperature curve."
+        return 1
+    fi
+
+    if ! python3 "$SCRIPT_DIR/drawtempcurve_auto.py" \
+        --file "$TEGRASTATS_LOG" \
+        --mode cpu_gpu \
+        --avg-min "$AVG_INTERVAL_MIN" \
+        --interval-ms 1000 \
+        --out "$out_png"; then
+        echo "ERROR: drawtempcurve_auto.py failed."
+        return 1
+    fi
+
+    print_pass "RESULT,TEMP_CURVE,$out_png,PASS"
+}
+
+finish_test() {
+    cleanup_tegrastats
+    draw_temperature_curve || true
+    if [ -n "$RESULT_DIR" ]; then
+        {
+            echo "Test name: $TEST_NAME"
+            echo "Host: $(hostname)"
+            echo "Date finished: $(date -Iseconds)"
+            echo "Server: $SERVER_HOST"
+            echo "URL: $URL"
+            echo "Duration seconds: $TEST_DURATION_SECONDS"
+            echo "Average interval minutes: $AVG_INTERVAL_MIN"
+            echo "Video codec: $VIDEO_CODEC"
+            echo "Audio codec: $AUDIO_CODEC"
+            echo "Format: $FORMAT_NAME"
+            echo "Source FPS: $SOURCE_FPS"
+            echo "Tegrastats log: $TEGRASTATS_LOG"
+            echo "Temperature PNG: ${RESULT_DIR}/tegrastats_cpu_gpu.png"
+        } > "${RESULT_DIR}/test_summary.txt"
+        echo ""
+        echo "Result directory: $RESULT_DIR"
+    fi
+}
+
+handle_interrupt() {
+    echo ""
+    echo "Interrupted. Stopping stress test..."
+    TEST_TIME_UP=true
+    finish_test
+    exit 130
+}
+
 require_cmd() {
     local cmd="$1"
     if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -65,6 +146,47 @@ ensure_sshpass() {
     echo "sshpass not found. Installing sshpass..."
     sudo apt-get update
     sudo apt-get install -y sshpass
+}
+
+prompt_test_duration() {
+    local input
+
+    if [ -z "$TEST_DURATION_SECONDS" ]; then
+        read -rp "Enter stress test duration in seconds [43200]: " input
+        TEST_DURATION_SECONDS="${input:-43200}"
+    fi
+
+    if ! echo "$TEST_DURATION_SECONDS" | grep -Eq '^[0-9]+$' || [ "$TEST_DURATION_SECONDS" -lt 1 ]; then
+        echo "ERROR: duration must be an integer >= 1."
+        exit 1
+    fi
+
+    if [ -z "$AVG_INTERVAL_MIN" ]; then
+        read -rp "Temperature graph average interval in minutes, 0 = raw [30]: " input
+        AVG_INTERVAL_MIN="${input:-30}"
+    fi
+
+    if ! echo "$AVG_INTERVAL_MIN" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+        echo "ERROR: average interval must be a number >= 0."
+        exit 1
+    fi
+}
+
+start_tegrastats_log() {
+    local ts
+    ts="$(date +%Y%m%d_%H%M%S)"
+    RESULT_DIR="${HOME}/6-3_streaming_stress_${ts}"
+    mkdir -p "$RESULT_DIR"
+    TEGRASTATS_LOG="${RESULT_DIR}/tegrastats.log"
+
+    if ! command -v tegrastats >/dev/null 2>&1; then
+        echo "WARNING: tegrastats not found. Temperature log/curve will be skipped."
+        return 0
+    fi
+
+    echo "Starting tegrastats log: $TEGRASTATS_LOG"
+    tegrastats --interval 1000 > "$TEGRASTATS_LOG" 2>&1 &
+    TEGRASTATS_PID=$!
 }
 
 read_cpu_totals() {
@@ -377,6 +499,11 @@ run_gst_with_one_line_status() {
     while kill -0 "$gst_pid" 2>/dev/null; do
         now="$(date +%s)"
         elapsed=$((now - start_ts))
+        if [ "$TEST_END_TS" -gt 0 ] && [ "$now" -ge "$TEST_END_TS" ]; then
+            TEST_TIME_UP=true
+            kill -INT "$gst_pid" 2>/dev/null || true
+            break
+        fi
         fps_value="$(latest_fps_from_log "$gst_log")"
         if [ "$ENABLE_FPS" = "true" ] && { [ -z "$fps_value" ] || [ "$fps_value" = "N/A" ]; } && [ "$SOURCE_FPS" != "unknown" ]; then
             fps_value="source:$SOURCE_FPS"
@@ -412,6 +539,10 @@ run_gst_with_one_line_status() {
             line="L=${loop_index} t=${elapsed}s FPS=${fps_value} DISP=${display_mode}"
         fi
 
+        if [ "$TEST_END_TS" -gt 0 ]; then
+            line="${line} left=$((TEST_END_TS - now))s"
+        fi
+
         latest_short="${line:0:$STATUS_WIDTH}"
         printf "\r%-${STATUS_WIDTH}s" "$latest_short"
         sleep 1
@@ -422,7 +553,9 @@ run_gst_with_one_line_status() {
     trap - INT
     echo ""
 
-    if [ "$rc" -eq 0 ]; then
+    if [ "$TEST_TIME_UP" = "true" ]; then
+        print_pass "RESULT,ONLINE_STREAMING_PLAYBACK,$loop_index,PASS,time-complete"
+    elif [ "$rc" -eq 0 ]; then
         print_pass "RESULT,ONLINE_STREAMING_PLAYBACK,$loop_index,PASS"
     else
         print_fail "RESULT,ONLINE_STREAMING_PLAYBACK,$loop_index,FAIL,rc=$rc"
@@ -491,6 +624,7 @@ echo "System stats: $ENABLE_SYS_STATS"
 echo "======================================"
 
 export DISPLAY="${DISPLAY:-:0}"
+trap handle_interrupt INT TERM
 
 require_cmd gst-launch-1.0 || exit 1
 require_cmd gst-inspect-1.0 || exit 1
@@ -499,6 +633,8 @@ require_cmd ffprobe || {
     sudo apt-get update
     sudo apt-get install -y ffmpeg
 }
+
+prompt_test_duration
 
 echo ""
 echo "Video server setup"
@@ -538,15 +674,21 @@ echo "Source FPS: $SOURCE_FPS"
 echo "Stats platform: $([ "$STATS_PLATFORM" = "auto" ] && detect_stats_platform || echo "$STATS_PLATFORM")"
 
 echo ""
-echo "Stress playback starts now. Press Ctrl+C to stop."
+echo "Stress playback starts now. It will stop after ${TEST_DURATION_SECONDS} second(s)."
+echo "Press Ctrl+C to stop early."
+
+start_tegrastats_log
+TEST_END_TS=$(($(date +%s) + TEST_DURATION_SECONDS))
 
 LOOP_INDEX=1
 while true; do
     play_once "$LOOP_INDEX"
+    [ "$TEST_TIME_UP" = "true" ] && break
     LOOP_INDEX=$((LOOP_INDEX + 1))
     [ "$LOOP_FOREVER" = "true" ] || break
     sleep 1
 done
 
 echo ""
+finish_test
 print_pass "TEST COMPLETE: $TEST_NAME"

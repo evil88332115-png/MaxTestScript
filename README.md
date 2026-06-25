@@ -65,6 +65,7 @@ Some scripts are interactive and may ask for interface selection, server IP, pas
 | `run_5_11_network_interface_initialization.sh` | Interactive LAN/Wi-Fi down/up initialization test |
 | `run_6_5_lan_continuous_throughput_monitoring.sh` | Continuous LAN throughput monitoring |
 | `run_6_6_network_monitor_packet_loss_rate.sh` | Continuous packet loss and latency monitoring using mtr |
+| `run_6_7_maximum_storage_utilization_test.sh` | Fill root filesystem with dd while leaving reserved free space |
 
 ### Multimedia
 
@@ -82,14 +83,14 @@ Some scripts are interactive and may ask for interface selection, server IP, pas
 
 | Script | Purpose |
 | --- | --- |
-| `run_4_25_thermal.sh` | Thermal logging/stress test |
-| `run_4_25_thermal_drawtemp.sh` | Thermal test with temperature curve output |
+| `run_4_25_thermal_drawtemp.sh` | Thermal test with hardware decode playback and CPU+GPU temperature curve output |
 | `drawtempcurve_auto.py` | Temperature curve drawing helper |
 | `run_5_4_rtc.sh` | Interactive RTC/timezone/shutdown test |
 | `run_7_1_coremark.sh` | CoreMark-PRO clone/build/run script |
 | `run_7_2_memory.sh` | sysbench memory read/write test |
 | `run_7_3_nvme_ssd.sh` | NVMe SSD dd read/write test |
 | `run_7_4_USB.sh` | Auto-detected USB storage dd read/write test |
+| `run_7_5_graphics_engine.sh` | Graphics engine benchmark using glmark2 and GravityMark |
 | `run_7_6_iperf2_network_bandwidth_test.sh` | iperf2 network bandwidth test with CSV/PNG/PDF report |
 | `run_8_3_client_net_security_test.sh` | Client network security/reliability test using ping, HTTP request, and iperf3 |
 

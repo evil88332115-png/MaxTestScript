@@ -81,6 +81,35 @@ install_tools() {
     exit 1
   fi
 
+  local package missing_packages=()
+  local command_name missing_commands=()
+
+  for package in "${PACKAGES[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "${package}" 2>/dev/null | grep -q "install ok installed"; then
+      missing_packages+=("${package}")
+    fi
+  done
+
+  for command_name in "${REQUIRED_COMMANDS[@]}"; do
+    if ! command -v "${command_name}" >/dev/null 2>&1; then
+      missing_commands+=("${command_name}")
+    fi
+  done
+
+  if [[ "${#missing_packages[@]}" -eq 0 && "${#missing_commands[@]}" -eq 0 ]]; then
+    echo "All shared requirements are already installed; skipping apt-get update/install."
+    return 0
+  fi
+
+  echo "Missing package(s): ${missing_packages[*]:-none}"
+  echo "Missing command(s): ${missing_commands[*]:-none}"
+
+  if [[ "${#missing_packages[@]}" -eq 0 ]]; then
+    echo "No missing apt package detected; skipping apt-get update/install."
+    echo "If commands are still missing, check PATH or package mapping."
+    return 0
+  fi
+
   local sudo_cmd=()
   if [[ "$(id -u)" -ne 0 ]]; then
     if ! command -v sudo >/dev/null 2>&1; then
@@ -90,12 +119,12 @@ install_tools() {
     sudo_cmd=(sudo)
   fi
 
-  echo "Installing/checking all test requirements..."
+  echo "Installing missing test requirements..."
   "${sudo_cmd[@]}" apt-get update
   if [[ "${#sudo_cmd[@]}" -gt 0 ]]; then
-    "${sudo_cmd[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "${PACKAGES[@]}"
+    "${sudo_cmd[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
   else
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${PACKAGES[@]}"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
   fi
 }
 
