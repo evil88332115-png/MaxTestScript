@@ -156,7 +156,7 @@ detect_gravitymark_dir() {
 }
 
 install_gravitymark() {
-  local source_installer local_installer
+  local source_installer local_installer license_answer target_dir rc
 
   mkdir -p "$WORK_DIR" "$LOG_DIR"
 
@@ -193,13 +193,36 @@ install_gravitymark() {
   echo ""
   echo "Installing GravityMark..."
   echo "Installer: $local_installer"
-  echo "Answering Y automatically."
-  print_command "$local_installer"
+  echo "License acceptance requires manual confirmation."
+  read -r -p "Accept GravityMark license and continue installation? Type y or n: " license_answer
+  case "$license_answer" in
+    y|Y) license_answer="y" ;;
+    n|N)
+      fail "RESULT,GRAPHICS_ENGINE,GRAVITYMARK_INSTALL,FAIL,license-not-accepted"
+      return 1
+      ;;
+    *)
+      fail "RESULT,GRAPHICS_ENGINE,GRAVITYMARK_INSTALL,FAIL,invalid-license-answer"
+      return 1
+      ;;
+  esac
+  echo "Installer embedded script will be skipped to avoid the second local-console prompt."
+  echo "Extract mode: --tar xf -C GravityMark_1.89_linux_arm64"
 
-  (
-    cd "$WORK_DIR"
-    printf 'Y\n' | "./${GRAVITYMARK_INSTALLER_NAME}"
-  )
+  target_dir="${WORK_DIR}/GravityMark_1.89_linux_arm64"
+  rm -rf "$target_dir"
+  mkdir -p "$target_dir"
+
+  print_command "$local_installer" --tar xf -C "$target_dir"
+  set +e
+  "$local_installer" --tar xf -C "$target_dir"
+  rc="$?"
+  set -e
+
+  if [ "$rc" -ne 0 ]; then
+    fail "RESULT,GRAPHICS_ENGINE,GRAVITYMARK_INSTALL,FAIL,extract-rc=${rc}"
+    return "$rc"
+  fi
 
   GRAVITYMARK_DIR="$(detect_gravitymark_dir || true)"
   if [ -n "$GRAVITYMARK_DIR" ] && [ -d "$GRAVITYMARK_DIR" ]; then
@@ -250,6 +273,8 @@ run_gravitymark() {
   rc=${PIPESTATUS[0]}
   set -e
 
+  stop_gravitymark_server
+
   score="$(extract_gravitymark_score "$log_file")"
   if [ -n "$score" ]; then
     echo "Score: ${score}"
@@ -263,6 +288,31 @@ run_gravitymark() {
 
 is_gravitymark_server_running() {
   pgrep -f 'Browser\.arm64' >/dev/null 2>&1
+}
+
+stop_gravitymark_server() {
+  if ! is_gravitymark_server_running; then
+    echo "GravityMark browser/server is not running."
+    pass "RESULT,GRAPHICS_ENGINE,GRAVITYMARK_SERVER,STOP,already-stopped"
+    return 0
+  fi
+
+  echo "Stopping GravityMark browser/server..."
+  pkill -f 'Browser\.arm64' >/dev/null 2>&1 || true
+  sleep 1
+
+  if is_gravitymark_server_running; then
+    pkill -9 -f 'Browser\.arm64' >/dev/null 2>&1 || true
+    sleep 1
+  fi
+
+  if is_gravitymark_server_running; then
+    fail "RESULT,GRAPHICS_ENGINE,GRAVITYMARK_SERVER,STOP,FAIL"
+    return 1
+  fi
+
+  pass "RESULT,GRAPHICS_ENGINE,GRAVITYMARK_SERVER,STOP,PASS"
+  return 0
 }
 
 ensure_gravitymark_server() {
