@@ -32,6 +32,25 @@ file_uri() {
   printf 'file://%s' "${path}"
 }
 
+setup_display() {
+  local uid xauth
+
+  export DISPLAY
+
+  if [[ -z "${XAUTHORITY:-}" ]]; then
+    uid="$(id -u)"
+    for xauth in \
+      "${HOME}/.Xauthority" \
+      "/run/user/${uid}/gdm/Xauthority" \
+      "/run/user/${uid}/Xauthority"; do
+      if [[ -r "${xauth}" ]]; then
+        export XAUTHORITY="${xauth}"
+        break
+      fi
+    done
+  fi
+}
+
 csv_escape() {
   local value="$1"
   value="${value//\"/\"\"}"
@@ -322,8 +341,13 @@ run_nvgstplayer_playback() {
   printf ' %q' "${FULL_PLAYER}" "${player_args[@]}"
   printf '\n'
 
-  "${FULL_PLAYER}" "${player_args[@]}" >"${log}" 2>&1
-  return $?
+  if [[ -t 0 ]]; then
+    "${FULL_PLAYER}" "${player_args[@]}" >"${log}" 2>&1
+    return $?
+  fi
+
+  tail -f /dev/null | "${FULL_PLAYER}" "${player_args[@]}" >"${log}" 2>&1
+  return "${PIPESTATUS[1]}"
 }
 
 run_fps_probe_py() {
@@ -493,7 +517,7 @@ play_file() {
   fps_summary="$(parse_fps_log "${log}")"
   IFS=',' read -r samples avg_fps min_fps max_fps <<<"${fps_summary}"
 
-  if [[ "${rc}" -eq 0 ]]; then
+  if [[ "${rc}" -eq 0 || ( "${rc}" -eq 124 && -n "${DURATION}" ) ]]; then
     status="PASS"
     printf '%sRESULT,FPS,%s,PASS,mode=gst-launch-hwdecode%s\n' \
       "${COLOR_RESULT}" "${base}" "${COLOR_RESET}"
@@ -522,6 +546,7 @@ run_hwdecode_playback() {
   local file="$1"
   local log="$2"
   local info codec format parser demux audio_codec sink decoder
+  local -a launch_prefix
 
   info="$(probe_video_info "${file}")"
   codec="$(printf '%s\n' "${info}" | awk -F= '$1=="codec_name" { print $2; exit }')"
@@ -531,6 +556,10 @@ run_hwdecode_playback() {
   demux="$(get_demux "${file}" "${format}")"
   sink="nv3dsink sync=true"
   decoder="nvv4l2decoder"
+  launch_prefix=()
+  if [[ -n "${DURATION}" ]]; then
+    launch_prefix=("${PLAYER_TIMEOUT}" --foreground "${DURATION}")
+  fi
 
   echo "Mode: hwdecode"
   echo "Pipeline target: ${demux} -> ${parser} -> ${decoder} -> nvvidconv -> ${sink}"
@@ -543,7 +572,7 @@ run_hwdecode_playback() {
   if [[ "${demux}" == "raw" ]]; then
     printf 'Command: %q -e filesrc location=%q ! %s ! %s ! nvvidconv ! %s\n' \
       "${GST_LAUNCH}" "${file}" "${parser}" "${decoder}" "${sink}"
-    "${GST_LAUNCH}" -e \
+    "${launch_prefix[@]}" "${GST_LAUNCH}" -e \
       filesrc location="${file}" ! \
       ${parser} ! ${decoder} ! nvvidconv ! \
       ${sink} >"${log}" 2>&1
@@ -553,7 +582,7 @@ run_hwdecode_playback() {
   if [[ "${demux}" == "tsdemux" || "${demux}" == "mpegpsdemux" || "${demux}" == "avidemux" ]]; then
     printf 'Command: %q -e filesrc location=%q ! %s name=demux demux. ! queue ! %s ! %s ! nvvidconv ! %s\n' \
       "${GST_LAUNCH}" "${file}" "${demux}" "${parser}" "${decoder}" "${sink}"
-    "${GST_LAUNCH}" -e \
+    "${launch_prefix[@]}" "${GST_LAUNCH}" -e \
       filesrc location="${file}" ! \
       ${demux} name=demux \
       demux. ! queue ! \
@@ -565,7 +594,7 @@ run_hwdecode_playback() {
   if [[ -n "${audio_codec}" ]] && audio_supported_for_demux "${demux}"; then
     printf 'Command: %q -e filesrc location=%q ! %s name=demux demux.video_0 ! queue ! %s ! %s ! nvvidconv ! %s demux.audio_0 ! queue ! decodebin ! audioconvert ! audioresample ! autoaudiosink\n' \
       "${GST_LAUNCH}" "${file}" "${demux}" "${parser}" "${decoder}" "${sink}"
-    "${GST_LAUNCH}" -e \
+    "${launch_prefix[@]}" "${GST_LAUNCH}" -e \
       filesrc location="${file}" ! \
       ${demux} name=demux \
       demux.video_0 ! queue ! \
@@ -578,7 +607,7 @@ run_hwdecode_playback() {
 
   printf 'Command: %q -e filesrc location=%q ! %s name=demux demux.video_0 ! queue ! %s ! %s ! nvvidconv ! %s\n' \
     "${GST_LAUNCH}" "${file}" "${demux}" "${parser}" "${decoder}" "${sink}"
-  "${GST_LAUNCH}" -e \
+  "${launch_prefix[@]}" "${GST_LAUNCH}" -e \
     filesrc location="${file}" ! \
     ${demux} name=demux demux.video_0 ! queue ! \
     ${parser} ! ${decoder} ! nvvidconv ! \
@@ -622,7 +651,9 @@ echo "Mode: ${MODE}"
 echo "Media directory: ${MEDIA_DIR}"
 echo "Log directory: ${LOG_DIR}"
 echo "Duration per file: ${DURATION}"
+setup_display
 echo "DISPLAY: ${DISPLAY:-not set}"
+echo "XAUTHORITY: ${XAUTHORITY:-not set}"
 echo
 
 if [[ ! -d "${MEDIA_DIR}" ]]; then

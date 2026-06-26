@@ -20,6 +20,37 @@ file_uri() {
   printf 'file://%s' "$1"
 }
 
+setup_display() {
+  local uid xauth
+
+  export DISPLAY
+
+  if [[ -z "${XAUTHORITY:-}" ]]; then
+    uid="$(id -u)"
+    for xauth in \
+      "${HOME}/.Xauthority" \
+      "/run/user/${uid}/gdm/Xauthority" \
+      "/run/user/${uid}/Xauthority"; do
+      if [[ -r "${xauth}" ]]; then
+        export XAUTHORITY="${xauth}"
+        break
+      fi
+    done
+  fi
+}
+
+run_player() {
+  local log="$1"
+  shift
+
+  if [[ -t 0 ]]; then
+    "${PLAYER}" "$@" >"${log}" 2>&1
+  else
+    tail -f /dev/null | "${PLAYER}" "$@" >"${log}" 2>&1
+    return "${PIPESTATUS[1]}"
+  fi
+}
+
 probe_video() {
   local file="$1"
 
@@ -77,16 +108,16 @@ run_playback() {
     command_label="Normal"
     echo "Playback: normal orientation"
     printf 'Command: %q -i %q\n' "${PLAYER}" "${uri}"
-    "${PLAYER}" -i "${uri}" >"${log}" 2>&1
+    run_player "${log}" -i "${uri}"
     rc="$?"
   else
     command_label="Clockwise 90"
     echo "Playback: clockwise 90 degrees"
     printf 'Command: %q --disable-vnative --svc=%q -i %q\n' \
       "${PLAYER}" "nvvidconv# flip-method=3" "${uri}"
-    "${PLAYER}" --disable-vnative \
+    run_player "${log}" --disable-vnative \
       --svc="nvvidconv# flip-method=3" \
-      -i "${uri}" >"${log}" 2>&1
+      -i "${uri}"
     rc="$?"
   fi
 
@@ -114,6 +145,9 @@ echo "Date: $(date --iso-8601=seconds)"
 echo "Media directory: ${MEDIA_DIR}"
 echo "Search: recursive, including all subdirectories"
 echo "Sequence: normal -> clockwise 90 degrees -> next file"
+setup_display
+echo "DISPLAY: ${DISPLAY}"
+echo "XAUTHORITY: ${XAUTHORITY:-not set}"
 echo
 
 if [[ ! -d "${MEDIA_DIR}" ]]; then

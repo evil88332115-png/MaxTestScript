@@ -21,6 +21,37 @@ file_uri() {
   printf 'file://%s' "$1"
 }
 
+setup_display() {
+  local uid xauth
+
+  export DISPLAY
+
+  if [[ -z "${XAUTHORITY:-}" ]]; then
+    uid="$(id -u)"
+    for xauth in \
+      "${HOME}/.Xauthority" \
+      "/run/user/${uid}/gdm/Xauthority" \
+      "/run/user/${uid}/Xauthority"; do
+      if [[ -r "${xauth}" ]]; then
+        export XAUTHORITY="${xauth}"
+        break
+      fi
+    done
+  fi
+}
+
+run_player() {
+  local uri="$1"
+  local log="$2"
+
+  if [[ -t 0 ]]; then
+    "${PLAYER}" -i "${uri}" >"${log}" 2>&1
+  else
+    tail -f /dev/null | "${PLAYER}" -i "${uri}" >"${log}" 2>&1
+    return "${PIPESTATUS[1]}"
+  fi
+}
+
 probe_video() {
   local file="$1"
 
@@ -97,6 +128,9 @@ echo "Date: $(date --iso-8601=seconds)"
 echo "Media directory: ${MEDIA_DIR}"
 echo "Player: ${PLAYER} -i"
 echo "Playback: full file, then automatically continue"
+setup_display
+echo "DISPLAY: ${DISPLAY}"
+echo "XAUTHORITY: ${XAUTHORITY:-not set}"
 echo
 
 if [[ ! -d "${MEDIA_DIR}" ]]; then
@@ -139,7 +173,7 @@ for i in "${!FILES[@]}"; do
   printf 'Command: %q -i %q\n' "${PLAYER}" "${uri}"
   echo "======================================"
 
-  "${PLAYER}" -i "${uri}" >"${log}" 2>&1
+  run_player "${uri}" "${log}"
   rc="$?"
 
   if [[ "${rc}" -eq 0 ]]; then

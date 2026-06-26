@@ -51,6 +51,25 @@ print_warn() { printf '%s%s%s\n' "${COLOR_WARN}" "$*" "${COLOR_RESET}"; }
 print_error() { printf '%s%s%s\n' "${COLOR_ERROR}" "$*" "${COLOR_RESET}"; }
 print_result() { printf '%s%s%s\n' "${COLOR_RESULT}" "$*" "${COLOR_RESET}"; }
 
+setup_display() {
+  local uid xauth
+
+  export DISPLAY
+
+  if [[ -z "${XAUTHORITY:-}" ]]; then
+    uid="$(id -u)"
+    for xauth in \
+      "${HOME}/.Xauthority" \
+      "/run/user/${uid}/gdm/Xauthority" \
+      "/run/user/${uid}/Xauthority"; do
+      if [[ -r "${xauth}" ]]; then
+        export XAUTHORITY="${xauth}"
+        break
+      fi
+    done
+  fi
+}
+
 cleanup() {
   STOP_REQUESTED=true
   if [[ -n "${GST_PID:-}" ]] && kill -0 "${GST_PID}" 2>/dev/null; then
@@ -301,6 +320,7 @@ require_cmd gst-inspect-1.0
 require_cmd ffprobe
 require_cmd tegrastats
 require_cmd python3
+setup_display
 
 select_source_mode
 
@@ -333,6 +353,7 @@ echo "Starting tegrastats and hardware decode playback..."
 echo "tegrastats log: ${TEGRATS_LOG}"
 echo "playback log: ${PLAYER_LOG}"
 echo "DISPLAY: ${DISPLAY:-not set}"
+echo "XAUTHORITY: ${XAUTHORITY:-not set}"
 print_command "${GST_CMD[@]}"
 
 set +e

@@ -5,6 +5,7 @@ MEDIA_DIR="${MEDIA_DIR:-/mnt/nas_home/TEST FILE/Reader Container Formats}"
 LOG_DIR="${LOG_DIR:-/tmp/reader_container_4_24_logs}"
 PLAYER="${PLAYER:-nvgstplayer-1.0}"
 INDEXES="${INDEXES:-01 02 03 04 05 06 07 08 09 10}"
+DISPLAY="${DISPLAY:-:0}"
 
 if [[ -t 1 ]]; then
   COLOR_ERROR=$'\033[1;31m'
@@ -21,6 +22,25 @@ fi
 file_uri() {
   local path="$1"
   printf 'file://%s' "${path}"
+}
+
+setup_display() {
+  local uid xauth
+
+  export DISPLAY
+
+  if [[ -z "${XAUTHORITY:-}" ]]; then
+    uid="$(id -u)"
+    for xauth in \
+      "${HOME}/.Xauthority" \
+      "/run/user/${uid}/gdm/Xauthority" \
+      "/run/user/${uid}/Xauthority"; do
+      if [[ -r "${xauth}" ]]; then
+        export XAUTHORITY="${xauth}"
+        break
+      fi
+    done
+  fi
 }
 
 prompt_continue() {
@@ -111,8 +131,13 @@ play_file() {
   echo "If the screen is black, stuck, or not playing correctly, press Ctrl+C to skip this file and continue to the next one."
   set +e
   trap 'interrupted=1' INT
-  "${PLAYER}" -i "$(file_uri "${file}")" >"${log}" 2>&1
-  status="$?"
+  if [[ -t 0 ]]; then
+    "${PLAYER}" -i "$(file_uri "${file}")" >"${log}" 2>&1
+    status="$?"
+  else
+    tail -f /dev/null | "${PLAYER}" -i "$(file_uri "${file}")" >"${log}" 2>&1
+    status="${PIPESTATUS[1]}"
+  fi
   trap - INT
   set -e
 
@@ -147,6 +172,9 @@ echo "Host: $(hostname)"
 echo "Date: $(date --iso-8601=seconds)"
 echo "Media directory: ${MEDIA_DIR}"
 echo "Log directory: ${LOG_DIR}"
+setup_display
+echo "DISPLAY: ${DISPLAY}"
+echo "XAUTHORITY: ${XAUTHORITY:-not set}"
 echo
 
 if [[ ! -d "${MEDIA_DIR}" ]]; then

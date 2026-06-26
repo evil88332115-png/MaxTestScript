@@ -57,6 +57,25 @@ print_warn() { echo -e "${YELLOW}$1${NC}" >&2; }
 print_hwdecode() { echo -e "${GREEN}[HW Decode] $1${NC}"; }
 print_swdecode() { echo -e "${RED}[SW Decode / Fallback] $1${NC}"; }
 
+setup_display() {
+    local uid xauth
+
+    export DISPLAY="${DISPLAY:-:0}"
+
+    if [ -z "${XAUTHORITY:-}" ]; then
+        uid="$(id -u)"
+        for xauth in \
+            "${HOME}/.Xauthority" \
+            "/run/user/${uid}/gdm/Xauthority" \
+            "/run/user/${uid}/Xauthority"; do
+            if [ -r "$xauth" ]; then
+                export XAUTHORITY="$xauth"
+                break
+            fi
+        done
+    fi
+}
+
 cleanup_tegrastats() {
     if [ -n "${TEGRASTATS_PID:-}" ] && kill -0 "$TEGRASTATS_PID" >/dev/null 2>&1; then
         kill "$TEGRASTATS_PID" >/dev/null 2>&1 || true
@@ -623,7 +642,9 @@ echo "FPS enabled: $ENABLE_FPS"
 echo "System stats: $ENABLE_SYS_STATS"
 echo "======================================"
 
-export DISPLAY="${DISPLAY:-:0}"
+setup_display
+echo "DISPLAY: ${DISPLAY:-not set}"
+echo "XAUTHORITY: ${XAUTHORITY:-not set}"
 trap handle_interrupt INT TERM
 
 require_cmd gst-launch-1.0 || exit 1
