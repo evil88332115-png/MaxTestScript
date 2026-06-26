@@ -5,6 +5,16 @@ TEST_FILE_NAME=".usb_7_4_test.bin"
 BLOCK_SIZE="512k"
 BLOCK_COUNT="2048"
 
+if [[ -t 1 ]]; then
+  GREEN=$'\033[1;32m'
+  RED=$'\033[1;31m'
+  RESET=$'\033[0m'
+else
+  GREEN=""
+  RED=""
+  RESET=""
+fi
+
 scan_usb_mounts() {
   lsblk -P -o NAME,PATH,TYPE,TRAN,RM,SIZE,FSTYPE,MOUNTPOINTS 2>/dev/null |
     awk '
@@ -30,6 +40,16 @@ scan_usb_mounts() {
         }
       }
     '
+}
+
+extract_dd_speed() {
+  awk -F, '
+    /copied/ {
+      speed=$NF
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", speed)
+      print speed
+    }
+  ' | tail -n 1
 }
 
 select_usb_mount() {
@@ -110,7 +130,9 @@ echo "7.4 USB - Write Test"
 printf 'Command: dd if=/dev/zero of=%q bs=%s count=%s conv=fsync\n' \
   "${TEST_FILE}" "${BLOCK_SIZE}" "${BLOCK_COUNT}"
 echo "======================================"
-dd if=/dev/zero of="${TEST_FILE}" bs="${BLOCK_SIZE}" count="${BLOCK_COUNT}" conv=fsync
+WRITE_OUTPUT="$(dd if=/dev/zero of="${TEST_FILE}" bs="${BLOCK_SIZE}" count="${BLOCK_COUNT}" conv=fsync 2>&1)"
+printf '%s\n' "${WRITE_OUTPUT}"
+WRITE_SPEED="$(printf '%s\n' "${WRITE_OUTPUT}" | extract_dd_speed)"
 
 echo
 echo "======================================"
@@ -126,10 +148,21 @@ echo "7.4 USB - Read Test"
 printf 'Command: dd if=%q of=/dev/null bs=%s count=%s\n' \
   "${TEST_FILE}" "${BLOCK_SIZE}" "${BLOCK_COUNT}"
 echo "======================================"
-dd if="${TEST_FILE}" of=/dev/null bs="${BLOCK_SIZE}" count="${BLOCK_COUNT}"
+READ_OUTPUT="$(dd if="${TEST_FILE}" of=/dev/null bs="${BLOCK_SIZE}" count="${BLOCK_COUNT}" 2>&1)"
+printf '%s\n' "${READ_OUTPUT}"
+READ_SPEED="$(printf '%s\n' "${READ_OUTPUT}" | extract_dd_speed)"
 
 echo
 echo "Removing test file: ${TEST_FILE}"
 rm -f -- "${TEST_FILE}"
 TEST_FILE=""
-echo "RESULT,USB_STORAGE,PASS,device=${USB_DEVICE},mount=${USB_MOUNT}"
+printf '%s' "${GREEN}"
+echo "======================================"
+echo "7.4 USB Storage Test Result"
+echo "Device: ${USB_DEVICE}"
+echo "Mount:  ${USB_MOUNT}"
+echo "Write:  ${WRITE_SPEED:-unknown}"
+echo "Read:   ${READ_SPEED:-unknown}"
+echo "Status: PASS"
+echo "======================================"
+printf '%s' "${RESET}"

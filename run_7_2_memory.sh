@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
+if [[ -t 1 ]]; then
+  GREEN=$'\033[1;32m'
+  RED=$'\033[1;31m'
+  RESET=$'\033[0m'
+else
+  GREEN=""
+  RED=""
+  RESET=""
+fi
+
 if ! command -v sysbench >/dev/null 2>&1; then
   echo "sysbench is not installed."
   echo "Installing sysbench..."
@@ -50,8 +60,10 @@ WRITE_MIB_S="$(printf '%s\n' "${WRITE_OUTPUT}" |
 WRITE_GB_S="$(awk -v value="${WRITE_MIB_S:-0}" 'BEGIN { printf "%.2f", value * 1048576 / 1000000000 }')"
 
 echo
+printf '%s' "${GREEN}"
 echo "======================================"
 echo "7.2 Memory Test Result"
 echo "Read:  ${READ_GB_S} GB/s"
 echo "Write: ${WRITE_GB_S} GB/s"
 echo "======================================"
+printf '%s' "${RESET}"

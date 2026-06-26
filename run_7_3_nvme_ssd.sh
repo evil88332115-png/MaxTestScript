@@ -3,6 +3,16 @@ set -e
 
 TEST_FILE="test.bin"
 
+if [[ -t 1 ]]; then
+  GREEN=$'\033[1;32m'
+  RED=$'\033[1;31m'
+  RESET=$'\033[0m'
+else
+  GREEN=""
+  RED=""
+  RESET=""
+fi
+
 install_required_tools() {
   local packages=()
 
@@ -24,22 +34,14 @@ install_required_tools() {
   done
 }
 
-format_speed() {
-  local bytes="$1"
-  local seconds="$2"
-
-  awk -v bytes="${bytes}" -v seconds="${seconds}" 'BEGIN {
-    if (seconds <= 0) {
-      print "unknown"
-      exit
+extract_dd_speed() {
+  awk -F, '
+    /copied/ {
+      speed=$NF
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", speed)
+      print speed
     }
-
-    mbps = bytes / seconds / 1000000
-    if (mbps >= 1000)
-      printf "%.2f GB/s", mbps / 1000
-    else
-      printf "%.2f MB/s", mbps
-  }'
+  ' | tail -n 1
 }
 
 cleanup() {
@@ -54,12 +56,9 @@ echo "======================================"
 echo "7.3 NVMe SSD - Write Test"
 echo "Command: sudo dd if=/dev/zero of=${TEST_FILE} bs=512k count=2048"
 echo "======================================"
-WRITE_START="$(date +%s.%N)"
 WRITE_OUTPUT="$(sudo dd if=/dev/zero of="${TEST_FILE}" bs=512k count=2048 conv=fsync 2>&1)"
-WRITE_END="$(date +%s.%N)"
 printf '%s\n' "${WRITE_OUTPUT}"
-WRITE_SECONDS="$(awk -v start="${WRITE_START}" -v end="${WRITE_END}" 'BEGIN { print end - start }')"
-WRITE_SPEED="$(format_speed 1073741824 "${WRITE_SECONDS}")"
+WRITE_SPEED="$(printf '%s\n' "${WRITE_OUTPUT}" | extract_dd_speed)"
 
 echo
 echo "======================================"
@@ -74,19 +73,18 @@ echo "======================================"
 echo "7.3 NVMe SSD - Read Test"
 echo "Command: sudo dd if=${TEST_FILE} of=/dev/null bs=512k count=2048"
 echo "======================================"
-READ_START="$(date +%s.%N)"
 READ_OUTPUT="$(sudo dd if="${TEST_FILE}" of=/dev/null bs=512k count=2048 2>&1)"
-READ_END="$(date +%s.%N)"
 printf '%s\n' "${READ_OUTPUT}"
-READ_SECONDS="$(awk -v start="${READ_START}" -v end="${READ_END}" 'BEGIN { print end - start }')"
-READ_SPEED="$(format_speed 1073741824 "${READ_SECONDS}")"
+READ_SPEED="$(printf '%s\n' "${READ_OUTPUT}" | extract_dd_speed)"
 
 echo
+printf '%s' "${GREEN}"
 echo "======================================"
 echo "7.3 NVMe SSD Test Result"
 echo "Write: ${WRITE_SPEED}"
 echo "Read:  ${READ_SPEED}"
 echo "======================================"
+printf '%s' "${RESET}"
 
 rm -f -- "${TEST_FILE}"
 trap - EXIT INT TERM
