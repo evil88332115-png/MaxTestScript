@@ -120,7 +120,7 @@ stop_tegrastats() {
 draw_temperature_curve() {
   local tegrastats_log="$1"
   local output_png="$2"
-  local draw_script plot_log line_count
+  local draw_script plot_log line_count target_samples
 
   if [ ! -s "$tegrastats_log" ]; then
     warn "WARNING: tegrastats log is empty, skip temperature graph."
@@ -129,12 +129,13 @@ draw_temperature_curve() {
 
   plot_log="${tegrastats_log%.log}_trimmed.log"
   line_count="$(wc -l < "$tegrastats_log" 2>/dev/null || echo 0)"
-  if [ "$line_count" -gt 1 ]; then
-    head -n -1 "$tegrastats_log" > "$plot_log"
-    echo "Temperature graph input: $plot_log (last tegrastats sample removed)"
+  target_samples=$(( (DURATION * 1000 + TEGRATS_INTERVAL_MS - 1) / TEGRATS_INTERVAL_MS ))
+  if [ "$target_samples" -gt 0 ] && [ "$line_count" -gt "$target_samples" ]; then
+    head -n "$target_samples" "$tegrastats_log" > "$plot_log"
+    echo "Temperature graph input: $plot_log (${target_samples}/${line_count} tegrastats samples kept)"
   else
     cp -f "$tegrastats_log" "$plot_log"
-    echo "Temperature graph input: $plot_log"
+    echo "Temperature graph input: $plot_log (${line_count} tegrastats samples)"
   fi
 
   draw_script="$(detect_draw_temp_script || true)"

@@ -44,7 +44,7 @@ read_model() {
 }
 
 ensure_matplotlib() {
-  if python3 - <<'PY' >/dev/null 2>&1
+  if env PYTHONNOUSERSITE=1 python3 - <<'PY' >/dev/null 2>&1
 import matplotlib
 PY
   then
@@ -76,7 +76,7 @@ prepare_repo() {
 parse_and_draw_results() {
   local model="$1"
 
-  python3 - "${LOG_FILE}" "${WORKLOAD_CSV}" "${MARK_CSV}" "${PNG_FILE}" "${model}" <<'PY'
+  env PYTHONNOUSERSITE=1 python3 - "${LOG_FILE}" "${WORKLOAD_CSV}" "${MARK_CSV}" "${PNG_FILE}" "${model}" <<'PY'
 import csv
 import re
 import sys
@@ -181,16 +181,6 @@ ax.legend()
 ax.grid(axis="y", alpha=0.25)
 fig.tight_layout()
 fig.savefig(png_file, dpi=150)
-
-print("Parsed workload rows:")
-for name, m, s, scale in rows:
-    print(f"{name:48s} {m:10.2f} {s:10.2f} {scale:8.2f}")
-
-if marks:
-    print()
-    print("Mark results:")
-    for name, m, s, scale in marks:
-        print(f"{name:48s} {m:10.2f} {s:10.2f} {scale:8.2f}")
 PY
 }
 
