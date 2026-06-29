@@ -37,6 +37,8 @@ MODELS=(
   "yolov5x.onnx"
 )
 
+ACTIVE_JETSON_CLOCKS_STORE=""
+
 if [ -t 1 ]; then
   RED="\033[31m"
   GREEN="\033[32m"
@@ -118,11 +120,21 @@ stop_tegrastats() {
 draw_temperature_curve() {
   local tegrastats_log="$1"
   local output_png="$2"
-  local draw_script
+  local draw_script plot_log line_count
 
   if [ ! -s "$tegrastats_log" ]; then
     warn "WARNING: tegrastats log is empty, skip temperature graph."
     return 0
+  fi
+
+  plot_log="${tegrastats_log%.log}_trimmed.log"
+  line_count="$(wc -l < "$tegrastats_log" 2>/dev/null || echo 0)"
+  if [ "$line_count" -gt 1 ]; then
+    head -n -1 "$tegrastats_log" > "$plot_log"
+    echo "Temperature graph input: $plot_log (last tegrastats sample removed)"
+  else
+    cp -f "$tegrastats_log" "$plot_log"
+    echo "Temperature graph input: $plot_log"
   fi
 
   draw_script="$(detect_draw_temp_script || true)"
@@ -133,8 +145,8 @@ draw_temperature_curve() {
   fi
 
   echo "Drawing CPU+GPU temperature curve..."
-  print_command env PYTHONNOUSERSITE=1 python3 "$draw_script" --file "$tegrastats_log" --mode cpu_gpu --avg-min 0 --interval-ms "$TEGRATS_INTERVAL_MS" --out "$output_png"
-  if env PYTHONNOUSERSITE=1 python3 "$draw_script" --file "$tegrastats_log" --mode cpu_gpu --avg-min 0 --interval-ms "$TEGRATS_INTERVAL_MS" --out "$output_png"; then
+  print_command env PYTHONNOUSERSITE=1 python3 "$draw_script" --file "$plot_log" --mode cpu_gpu --avg-min 0 --interval-ms "$TEGRATS_INTERVAL_MS" --out "$output_png"
+  if env PYTHONNOUSERSITE=1 python3 "$draw_script" --file "$plot_log" --mode cpu_gpu --avg-min 0 --interval-ms "$TEGRATS_INTERVAL_MS" --out "$output_png"; then
     if [ -s "$output_png" ]; then
       pass "RESULT,TENSORRT,TEMP_GRAPH,PASS,$output_png"
     else
@@ -407,6 +419,23 @@ get_power_mode() {
   fi
 }
 
+sanitize_power_mode_name() {
+  local mode="$1"
+  mode="${mode// /}"
+  mode="${mode//_/}"
+  mode="${mode^^}"
+
+  case "$mode" in
+    MAXN|MAXNSUPER|MAXNMODE|MODEMAXN)
+      echo "MN"
+      ;;
+    *)
+      # Keep names like 40W / 25W / 15W readable, remove unsafe chars only.
+      echo "$mode" | sed -E 's/[^A-Z0-9]+//g'
+      ;;
+  esac
+}
+
 get_jetson_clocks_status() {
   local output
   output="$(sudo -n jetson_clocks --show 2>/dev/null || true)"
@@ -439,8 +468,46 @@ get_jetson_clocks_status() {
   echo "OFF"
 }
 
+restore_jetson_clocks() {
+  local store_file="${1:-${ACTIVE_JETSON_CLOCKS_STORE:-}}"
+
+  if [ -z "$store_file" ] || [ ! -s "$store_file" ]; then
+    return 0
+  fi
+
+  echo "Restoring jetson_clocks state..."
+  if sudo jetson_clocks --restore "$store_file"; then
+    sleep 1
+    echo "jetson_clocks status after restore: $(get_jetson_clocks_status)"
+    pass "RESULT,TENSORRT,JETSON_CLOCKS,RESTORE,PASS"
+  else
+    fail "RESULT,TENSORRT,JETSON_CLOCKS,RESTORE,FAIL"
+    return 1
+  fi
+
+  if [ "${ACTIVE_JETSON_CLOCKS_STORE:-}" = "$store_file" ]; then
+    ACTIVE_JETSON_CLOCKS_STORE=""
+  fi
+}
+
+cleanup_on_exit() {
+  restore_jetson_clocks "${ACTIVE_JETSON_CLOCKS_STORE:-}" || true
+}
+
+trap cleanup_on_exit EXIT INT TERM
+
 enable_jetson_clocks() {
+  local store_file="$1"
+
   echo "Enabling jetson_clocks before benchmark..."
+  echo "Storing current jetson_clocks state: $store_file"
+  if sudo jetson_clocks --store "$store_file"; then
+    ACTIVE_JETSON_CLOCKS_STORE="$store_file"
+  else
+    fail "RESULT,TENSORRT,JETSON_CLOCKS,STORE,FAIL"
+    return 1
+  fi
+
   if sudo jetson_clocks; then
     sleep 1
     echo "jetson_clocks status: $(get_jetson_clocks_status)"
@@ -519,19 +586,26 @@ write_report() {
 
 run_benchmark() {
   local index="$1"
-  local model_path model_stem engine_path run_dir log_file build_log report_file tegrastats_log temp_png info input_name shape_mode rc build_rc
+  local model_path model_stem power_mode power_label run_name engine_path run_dir log_file build_log report_file tegrastats_log temp_png clocks_store info input_name shape_mode rc build_rc
   local build_cmd=()
   local bench_cmd=()
 
   model_path="${USER_HOME}/${MODELS[$index]}"
   model_stem="${MODELS[$index]%.onnx}"
+  power_mode="$(get_power_mode)"
+  power_label="$(sanitize_power_mode_name "$power_mode")"
+  if [ -z "$power_label" ] || [ "$power_label" = "UNKNOWN" ]; then
+    power_label="UnknownPower"
+  fi
+  run_name="${power_label}${model_stem}"
   engine_path="${ENGINE_DIR}/${model_stem}_${PRECISION}.engine"
-  run_dir="${LOG_DIR}/${model_stem}_${PRECISION}"
+  run_dir="${LOG_DIR}/${run_name}"
   log_file="${run_dir}/trtexec_output.txt"
   build_log="${run_dir}/trtexec_build_output.txt"
   report_file="${run_dir}/report.md"
   tegrastats_log="${run_dir}/tegrastats_benchmark_${DURATION}s.log"
   temp_png="${run_dir}/tegrastats_cpu_gpu_${DURATION}s.png"
+  clocks_store="${run_dir}/jetson_clocks_before.conf"
 
   mkdir -p "$run_dir" "$ENGINE_DIR"
 
@@ -568,6 +642,7 @@ run_benchmark() {
     echo "Existing engine found; using it directly."
     bench_cmd+=("--loadEngine=${engine_path}")
   else
+    echo "${model_stem} building engine ..."
     echo "Engine not found; building engine first without tegrastats."
     build_cmd=(
       "$TRTEXEC"
@@ -597,8 +672,9 @@ run_benchmark() {
     bench_cmd+=("--loadEngine=${engine_path}")
   fi
 
-  enable_jetson_clocks || return 1
+  enable_jetson_clocks "$clocks_store" || return 1
 
+  echo "${model_stem} benchmark start ..."
   echo "Starting benchmark phase only. Tegrastats will cover this ${DURATION}s run."
   print_command "${bench_cmd[@]}"
   set +e
@@ -621,6 +697,8 @@ run_benchmark() {
   else
     fail "RESULT,TENSORRT,$model_stem,$PRECISION,FAIL,rc=$rc,log=$log_file"
   fi
+
+  restore_jetson_clocks "$clocks_store" || true
 
   return "$rc"
 }

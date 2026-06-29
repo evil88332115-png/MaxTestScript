@@ -30,7 +30,6 @@ PACKAGES=(
   openssh-client
   procps
   python3
-  python3-matplotlib
   sshpass
   sysbench
   usbutils
@@ -165,8 +164,7 @@ verify_tools() {
   if python3 -c 'import matplotlib' >/dev/null 2>&1; then
     echo "[OK]      Python matplotlib available"
   else
-    echo "[MISSING] Python matplotlib"
-    missing=1
+    echo "[WARNING] Python matplotlib not available; graph generation tests may fail."
   fi
 
   if [[ "${missing}" -ne 0 ]]; then

@@ -7,13 +7,14 @@ from datetime import datetime
 
 import matplotlib
 
-# 在沒有桌面的環境也能存圖，例如 SSH / Jetson console。
 if os.environ.get("DISPLAY", "") == "":
     matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
+
 ALLOWED_EXTS = {".log", ".txt", ".csv"}
+
 MODE_MAP = {
     "cpu": {"cpu"},
     "gpu": {"gpu"},
@@ -23,6 +24,7 @@ MODE_MAP = {
     "gpu_tj": {"gpu", "tj"},
     "all": {"cpu", "gpu", "tj"},
 }
+
 INTERACTIVE_MODE_MAP = {
     "1": "cpu",
     "2": "gpu",
@@ -36,62 +38,59 @@ INTERACTIVE_MODE_MAP = {
 
 def list_files():
     files = []
-    for f in os.listdir("."):
-        if os.path.isfile(f):
-            ext = os.path.splitext(f)[1].lower()
-            if ext in ALLOWED_EXTS:
-                files.append(f)
-    files.sort()
-    return files
+    for name in os.listdir("."):
+        if os.path.isfile(name) and os.path.splitext(name)[1].lower() in ALLOWED_EXTS:
+            files.append(name)
+    return sorted(files)
 
 
 def choose_file(files):
     if not files:
-        print("目前路徑下找不到可用檔案。")
+        print("No supported .log/.txt/.csv files found in current directory.")
         return None
 
-    print("目前路徑下可選擇的檔案：")
-    for i, f in enumerate(files, 1):
-        print(f"{i}. {f}")
+    print("Available files:")
+    for i, name in enumerate(files, 1):
+        print(f"{i}. {name}")
 
     while True:
-        choice = input("\n請輸入要繪圖的檔案編號：").strip()
+        choice = input("\nSelect file number: ").strip()
         if not choice.isdigit():
-            print("請輸入數字。")
+            print("Please enter a valid number.")
             continue
-        idx = int(choice)
-        if 1 <= idx <= len(files):
-            return files[idx - 1]
-        print("編號超出範圍，請重新輸入。")
+        index = int(choice)
+        if 1 <= index <= len(files):
+            return files[index - 1]
+        print("Selection out of range. Please try again.")
 
 
 def choose_plot_mode():
-    print("\n請選擇要畫的溫度：")
-    print("1. CPU 溫度")
-    print("2. GPU 溫度")
-    print("3. TJ 溫度")
+    print("\nSelect temperature plot mode:")
+    print("1. CPU temperature")
+    print("2. GPU temperature")
+    print("3. TJ temperature")
     print("4. CPU + GPU")
     print("5. CPU + TJ")
     print("6. GPU + TJ")
-    print("7. 全部 (CPU + GPU + TJ)")
+    print("7. All (CPU + GPU + TJ)")
 
     while True:
-        choice = input("請輸入選項 (1/2/3/4/5/6/7)：").strip()
+        choice = input("Select mode (1/2/3/4/5/6/7): ").strip()
         if choice in INTERACTIVE_MODE_MAP:
             return INTERACTIVE_MODE_MAP[choice]
-        print("請輸入 1、2、3、4、5、6 或 7。")
+        print("Please enter a number from 1 to 7.")
 
 
 def choose_avg_interval():
     while True:
-        value = input("請輸入平均區間（分鐘，0 表示不平均，直接畫原始資料）：").strip()
+        value = input("Average interval in minutes, 0 = raw data: ").strip()
         try:
             minutes = float(value)
             if minutes >= 0:
                 return minutes
-            print("請輸入大於等於 0 的數字。")
+            print("Please enter a number >= 0.")
         except ValueError:
-            print("請輸入有效數字。")
+            print("Please enter a valid number.")
 
 
 def parse_tegrastats_temps(filepath, interval_ms=1000):
@@ -100,18 +99,17 @@ def parse_tegrastats_temps(filepath, interval_ms=1000):
     gpu_temps = []
     tj_temps = []
 
-    # 支援 drawtemp 原本吃的「MM-DD-YYYY HH:MM:SS」時間戳。
     time_pattern = re.compile(r"(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})")
     cpu_temp_pattern = re.compile(r"\bcpu@([+-]?\d+(?:\.\d+)?)C", re.IGNORECASE)
     gpu_temp_pattern = re.compile(r"\bgpu@([+-]?\d+(?:\.\d+)?)C", re.IGNORECASE)
     tj_temp_pattern = re.compile(r"\btj@([+-]?\d+(?:\.\d+)?)C", re.IGNORECASE)
 
-    timestamp_rows = []
+    base_time = None
     sample_idx = 0
     interval_min = float(interval_ms) / 60000.0
 
-    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
+    with open(filepath, "r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
             cpu_match = cpu_temp_pattern.search(line)
             gpu_match = gpu_temp_pattern.search(line)
             tj_match = tj_temp_pattern.search(line)
@@ -119,21 +117,19 @@ def parse_tegrastats_temps(filepath, interval_ms=1000):
             if not (cpu_match or gpu_match or tj_match):
                 continue
 
-            tmatch = time_pattern.search(line)
-            if tmatch:
+            time_match = time_pattern.search(line)
+            if time_match:
                 try:
-                    ts = datetime.strptime(tmatch.group(1), "%m-%d-%Y %H:%M:%S")
-                    timestamp_rows.append(ts)
-                    if len(timestamp_rows) == 1:
-                        base_time = ts
-                    t_min = (ts - base_time).total_seconds() / 60.0
+                    timestamp = datetime.strptime(time_match.group(1), "%m-%d-%Y %H:%M:%S")
+                    if base_time is None:
+                        base_time = timestamp
+                    time_min = (timestamp - base_time).total_seconds() / 60.0
                 except ValueError:
-                    t_min = sample_idx * interval_min
+                    time_min = sample_idx * interval_min
             else:
-                # tegrastats 預設通常不會印時間戳，所以用 sample index + interval 推時間。
-                t_min = sample_idx * interval_min
+                time_min = sample_idx * interval_min
 
-            times_min.append(t_min)
+            times_min.append(time_min)
             cpu_temps.append(float(cpu_match.group(1)) if cpu_match else None)
             gpu_temps.append(float(gpu_match.group(1)) if gpu_match else None)
             tj_temps.append(float(tj_match.group(1)) if tj_match else None)
@@ -141,15 +137,15 @@ def parse_tegrastats_temps(filepath, interval_ms=1000):
 
     if not times_min:
         return None, None, None, None
-
     return times_min, cpu_temps, gpu_temps, tj_temps
 
 
 def parse_csv_temps(filepath):
-    with open(filepath, "r", encoding="utf-8", errors="ignore", newline="") as f:
-        reader = csv.DictReader(f)
+    with open(filepath, "r", encoding="utf-8", errors="ignore", newline="") as handle:
+        reader = csv.DictReader(handle)
         if not reader.fieldnames:
             return None, None, None, None
+
         fields_lower = {name.lower(): name for name in reader.fieldnames}
         seconds_col = fields_lower.get("seconds")
         time_min_col = fields_lower.get("time_min") or fields_lower.get("minutes")
@@ -158,20 +154,21 @@ def parse_csv_temps(filepath):
         tj_col = fields_lower.get("tj") or fields_lower.get("tj@") or fields_lower.get("tj_temp")
 
         times_min, cpu_temps, gpu_temps, tj_temps = [], [], [], []
-        for idx, row in enumerate(reader):
+
+        for index, row in enumerate(reader):
             if seconds_col and row.get(seconds_col, "") != "":
-                t = float(row[seconds_col]) / 60.0
+                time_min = float(row[seconds_col]) / 60.0
             elif time_min_col and row.get(time_min_col, "") != "":
-                t = float(row[time_min_col])
+                time_min = float(row[time_min_col])
             else:
-                t = float(idx)
+                time_min = float(index)
 
-            def cell(col):
-                if not col or row.get(col, "") == "":
+            def cell(column):
+                if not column or row.get(column, "") == "":
                     return None
-                return float(row[col])
+                return float(row[column])
 
-            times_min.append(t)
+            times_min.append(time_min)
             cpu_temps.append(cell(cpu_col))
             gpu_temps.append(cell(gpu_col))
             tj_temps.append(cell(tj_col))
@@ -193,27 +190,25 @@ def average_by_interval(times_min, values, interval_min):
     if interval_min <= 0:
         filtered_times = []
         filtered_values = []
-        for t, v in zip(times_min, values):
-            if v is not None:
-                filtered_times.append(t)
-                filtered_values.append(v)
+        for time_min, value in zip(times_min, values):
+            if value is not None:
+                filtered_times.append(time_min)
+                filtered_values.append(value)
         return filtered_times, filtered_values
 
     buckets = {}
-    for t, v in zip(times_min, values):
-        if v is None:
+    for time_min, value in zip(times_min, values):
+        if value is None:
             continue
-        bucket_idx = int(t // interval_min)
-        buckets.setdefault(bucket_idx, []).append((t, v))
+        bucket_idx = int(time_min // interval_min)
+        buckets.setdefault(bucket_idx, []).append((time_min, value))
 
     avg_times = []
     avg_values = []
     for bucket_idx in sorted(buckets.keys()):
         samples = buckets[bucket_idx]
-        avg_time = sum(t for t, _ in samples) / len(samples)
-        avg_temp = sum(v for _, v in samples) / len(samples)
-        avg_times.append(avg_time)
-        avg_values.append(avg_temp)
+        avg_times.append(sum(time_min for time_min, _ in samples) / len(samples))
+        avg_values.append(sum(value for _, value in samples) / len(samples))
     return avg_times, avg_values
 
 
@@ -221,20 +216,19 @@ def calc_overlap_ratio(values_a, values_b, tolerance=0.3):
     paired = [(a, b) for a, b in zip(values_a, values_b) if a is not None and b is not None]
     if not paired:
         return 0.0
-    overlap_count = sum(1 for a, b in paired if abs(a - b) <= tolerance)
-    return overlap_count / len(paired)
+    return sum(1 for a, b in paired if abs(a - b) <= tolerance) / len(paired)
 
 
 def print_basic_stats(name, values):
-    filtered = [v for v in values if v is not None]
+    filtered = [value for value in values if value is not None]
     if not filtered:
-        print(f"{name}: 無資料")
+        print(f"{name}: no data")
         return
     print(
-        f"{name}: 筆數={len(filtered)}, "
-        f"最低={min(filtered):.2f}°C, "
-        f"最高={max(filtered):.2f}°C, "
-        f"平均={sum(filtered) / len(filtered):.2f}°C"
+        f"{name}: samples={len(filtered)}, "
+        f"min={min(filtered):.2f}°C, "
+        f"max={max(filtered):.2f}°C, "
+        f"avg={sum(filtered) / len(filtered):.2f}°C"
     )
 
 
@@ -243,10 +237,19 @@ def default_output_name(filename, mode, avg_interval):
     return os.path.splitext(filename)[0] + suffix
 
 
-def plot_temps(times_cpu, temps_cpu,
-               times_gpu, temps_gpu,
-               times_tj, temps_tj,
-               filename, mode, avg_interval, out_png=None, show=False):
+def plot_temps(
+    times_cpu,
+    temps_cpu,
+    times_gpu,
+    temps_gpu,
+    times_tj,
+    temps_tj,
+    filename,
+    mode,
+    avg_interval,
+    out_png=None,
+    show=False,
+):
     plt.figure(figsize=(12, 6))
     plotted = False
 
@@ -285,15 +288,33 @@ def plot_temps(times_cpu, temps_cpu,
         plotted = True
 
     if "gpu" in sensors and temps_gpu:
-        plt.plot(times_gpu, temps_gpu, linewidth=gpu_style["linewidth"], color=gpu_style["color"], linestyle=gpu_style["linestyle"], alpha=gpu_style["alpha"], zorder=gpu_style["zorder"], label=gpu_style["label"])
+        plt.plot(
+            times_gpu,
+            temps_gpu,
+            linewidth=gpu_style["linewidth"],
+            color=gpu_style["color"],
+            linestyle=gpu_style["linestyle"],
+            alpha=gpu_style["alpha"],
+            zorder=gpu_style["zorder"],
+            label=gpu_style["label"],
+        )
         plotted = True
 
     if "tj" in sensors and temps_tj:
-        plt.plot(times_tj, temps_tj, linewidth=tj_style["linewidth"], color=tj_style["color"], linestyle=tj_style["linestyle"], alpha=tj_style["alpha"], zorder=tj_style["zorder"], label=tj_style["label"])
+        plt.plot(
+            times_tj,
+            temps_tj,
+            linewidth=tj_style["linewidth"],
+            color=tj_style["color"],
+            linestyle=tj_style["linestyle"],
+            alpha=tj_style["alpha"],
+            zorder=tj_style["zorder"],
+            label=tj_style["label"],
+        )
         plotted = True
 
     if not plotted:
-        print("沒有可繪製的資料。")
+        print("No plottable temperature data.")
         return None
 
     title_suffix = f" ({avg_interval} min average)" if avg_interval > 0 else ""
@@ -308,7 +329,7 @@ def plot_temps(times_cpu, temps_cpu,
         out_png = default_output_name(filename, mode, avg_interval)
 
     plt.savefig(out_png, dpi=150)
-    print(f"\n圖片已儲存：{out_png}")
+    print(f"\nImage saved: {out_png}")
     if show:
         plt.show()
     else:
@@ -336,38 +357,43 @@ def main():
         selected = choose_file(files)
         if not selected:
             return 1
-        print(f"\n你選擇的檔案是：{selected}")
+        print(f"\nSelected file: {selected}")
         mode = choose_plot_mode()
         avg_interval = choose_avg_interval()
         show = True
 
     times_min, cpu_temps, gpu_temps, tj_temps = load_temps(selected, interval_ms=args.interval_ms)
     if times_min is None:
-        print("解析失敗：找不到有效溫度資料。")
+        print("Parse failed: no valid temperature data found.")
         return 1
 
-    print("\n=== 原始資料統計 ===")
+    print("\n=== Raw Data Statistics ===")
     print_basic_stats("CPU", cpu_temps)
     print_basic_stats("GPU", gpu_temps)
     print_basic_stats("TJ", tj_temps)
 
     if gpu_temps and tj_temps:
         overlap_ratio = calc_overlap_ratio(gpu_temps, tj_temps, tolerance=0.3)
-        print(f"GPU 與 TJ 重疊比例（誤差 ±0.3°C）: {overlap_ratio * 100:.2f}%")
+        print(f"GPU and TJ overlap ratio (tolerance ±0.3°C): {overlap_ratio * 100:.2f}%")
         if overlap_ratio >= 0.95:
-            print("提示：GPU 與 TJ 幾乎完全重疊，圖上可能會看起來像只有一條線。")
+            print("Note: GPU and TJ almost overlap; the plot may look like only one line.")
 
     cpu_times_avg, cpu_vals_avg = average_by_interval(times_min, cpu_temps, avg_interval)
     gpu_times_avg, gpu_vals_avg = average_by_interval(times_min, gpu_temps, avg_interval)
     tj_times_avg, tj_vals_avg = average_by_interval(times_min, tj_temps, avg_interval)
 
-    print(f"\n平均後資料筆數：CPU {len(cpu_vals_avg)} 筆、GPU {len(gpu_vals_avg)} 筆、TJ {len(tj_vals_avg)} 筆")
+    print(f"\nAveraged data points: CPU {len(cpu_vals_avg)}, GPU {len(gpu_vals_avg)}, TJ {len(tj_vals_avg)}")
 
     out_png = plot_temps(
-        cpu_times_avg, cpu_vals_avg,
-        gpu_times_avg, gpu_vals_avg,
-        tj_times_avg, tj_vals_avg,
-        selected, mode, avg_interval,
+        cpu_times_avg,
+        cpu_vals_avg,
+        gpu_times_avg,
+        gpu_vals_avg,
+        tj_times_avg,
+        tj_vals_avg,
+        selected,
+        mode,
+        avg_interval,
         out_png=args.out,
         show=show,
     )
