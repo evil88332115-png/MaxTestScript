@@ -112,24 +112,21 @@ repair_filesystem() {
   case "${filesystem,,}" in
     vfat|fat|fat16|fat32|msdos)
       if command -v fsck.vfat >/dev/null 2>&1; then
-        echo "Repairing FAT filesystem on $device ..."
-        sudo fsck.vfat -a "$device"
+        sudo fsck.vfat -a "$device" >/dev/null 2>&1
       else
         echo "WARN: fsck.vfat not found; skip repair for $device"
       fi
       ;;
     exfat)
       if command -v fsck.exfat >/dev/null 2>&1; then
-        echo "Repairing exFAT filesystem on $device ..."
-        sudo fsck.exfat -a "$device"
+        sudo fsck.exfat -a "$device" >/dev/null 2>&1
       else
         echo "WARN: fsck.exfat not found; skip repair for $device"
       fi
       ;;
     ext2|ext3|ext4)
       if command -v fsck >/dev/null 2>&1; then
-        echo "Repairing $filesystem filesystem on $device ..."
-        sudo fsck -y "$device"
+        sudo fsck -y "$device" >/dev/null 2>&1
       else
         echo "WARN: fsck not found; skip repair for $device"
       fi
@@ -148,18 +145,10 @@ safe_usb_unmount_and_repair() {
     return 0
   fi
 
-  echo
-  echo "======================================"
-  echo "7.4 USB - Safe Unmount / Repair"
-  echo "Command: sync"
-  echo "Command: udisksctl unmount -b ${USB_DEVICE}"
-  echo "Command: fsck repair for ${USB_FILESYSTEM:-unknown}"
-  echo "======================================"
-
   sync || true
 
   if findmnt -rn --source "${USB_DEVICE}" >/dev/null 2>&1; then
-    if udisksctl unmount -b "${USB_DEVICE}"; then
+    if udisksctl unmount -b "${USB_DEVICE}" >/dev/null 2>&1; then
       echo "OK: ${USB_DEVICE} unmounted"
     else
       echo "WARN: failed to unmount ${USB_DEVICE}" >&2
@@ -169,7 +158,7 @@ safe_usb_unmount_and_repair() {
   fi
 
   if repair_filesystem "${USB_DEVICE}" "${USB_FILESYSTEM:-}"; then
-    echo "OK: filesystem repair completed for ${USB_DEVICE}"
+    :
   else
     echo "WARN: filesystem repair failed for ${USB_DEVICE}" >&2
   fi
