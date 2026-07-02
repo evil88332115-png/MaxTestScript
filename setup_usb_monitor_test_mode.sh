@@ -166,12 +166,56 @@ echo
 echo "Flushing filesystem buffers..."
 sync
 
+repair_filesystem() {
+  local device="$1"
+  local filesystem="$2"
+
+  case "${filesystem,,}" in
+    vfat|fat|fat16|fat32|msdos)
+      if command -v fsck.vfat >/dev/null 2>&1; then
+        echo "Repairing FAT filesystem on $device ..."
+        fsck.vfat -a "$device"
+      else
+        echo "WARN: fsck.vfat not found; skip repair for $device"
+      fi
+      ;;
+    exfat)
+      if command -v fsck.exfat >/dev/null 2>&1; then
+        echo "Repairing exFAT filesystem on $device ..."
+        fsck.exfat -a "$device"
+      else
+        echo "WARN: fsck.exfat not found; skip repair for $device"
+      fi
+      ;;
+    ext2|ext3|ext4)
+      if command -v fsck >/dev/null 2>&1; then
+        echo "Repairing $filesystem filesystem on $device ..."
+        fsck -y "$device"
+      else
+        echo "WARN: fsck not found; skip repair for $device"
+      fi
+      ;;
+    "")
+      echo "WARN: unknown filesystem for $device; skip repair"
+      ;;
+    *)
+      echo "WARN: unsupported filesystem '$filesystem' on $device; skip repair"
+      ;;
+  esac
+}
+
 status=0
 for item in "${USB_PARTS[@]}"; do
   IFS='|' read -r device mount size filesystem transport <<<"$item"
   echo "Unmounting $device from $mount ..."
   if umount "$device"; then
     echo "OK: $device unmounted"
+    if repair_filesystem "$device" "$filesystem"; then
+      echo "OK: filesystem repair completed for $device"
+    else
+      echo "ERROR: filesystem repair failed for $device" >&2
+      status=1
+    fi
   else
     echo "ERROR: failed to unmount $device" >&2
     status=1
