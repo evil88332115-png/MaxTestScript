@@ -77,6 +77,14 @@ cat > "$TARGET_HOME/usb_monitor_terminal.sh" <<'EOF'
 while true; do
   clear
   lsusb -t
+  echo
+  echo "======================================="
+  echo "To Stop auto unmount please run"
+  echo "sudo systemctl stop usb-auto-safe-umount.service"
+  echo
+  echo "To Stop watch lsusb log service please run"
+  echo "sudo systemctl stop usb-monitor.service"
+  echo "======================================="
   sleep 1
 done
 EOF
