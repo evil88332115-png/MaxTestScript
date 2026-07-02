@@ -74,9 +74,7 @@ EOF
 
 cat > "$TARGET_HOME/usb_monitor_terminal.sh" <<'EOF'
 #!/bin/bash
-while true; do
-  clear
-  lsusb -t
+show_normal_mode_commands() {
   echo
   echo "======================================="
   echo "Return to normal mode:"
@@ -84,6 +82,15 @@ while true; do
   echo "mv ~/.config/autostart/usb-monitor-terminal.desktop ~/.config/autostart/usb-monitor-terminal.desktop.disabled"
   echo "sudo systemctl disable --now usb-monitor.service"
   echo "======================================="
+}
+
+trap 'show_normal_mode_commands; exit 0' INT TERM
+
+while true; do
+  clear
+  lsusb -t
+  echo
+  echo "Press Ctrl+C to stop and show normal mode commands."
   sleep 1
 done
 EOF
