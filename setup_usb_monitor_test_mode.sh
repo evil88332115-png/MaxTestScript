@@ -16,6 +16,11 @@ if [[ -z "$TARGET_HOME" || ! -d "$TARGET_HOME" ]]; then
   exit 1
 fi
 
+if command -v apt-get >/dev/null 2>&1 && ! command -v fsck.exfat >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y exfatprogs
+fi
+
 cat > /usr/local/bin/usb_monitor_service.sh <<'EOF'
 #!/bin/bash
 set -u
