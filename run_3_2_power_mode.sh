@@ -19,8 +19,12 @@ STATE_FILE="${STATE_DIR}/state.env"
 STATE_RESULT_FILE="${STATE_DIR}/power_mode_result.txt"
 LOG_DIR="${HOME}/3-2_power_mode_$(date +%Y%m%d_%H%M%S)"
 RESULT_FILE="${LOG_DIR}/power_mode_result.txt"
+TRANSCRIPT_FILE=""
 AUTO_RESUME="${AUTO_RESUME:-0}"
+TRANSCRIPT_STARTED="${TRANSCRIPT_STARTED:-0}"
 AUTORUN_SERVICE="run-3-2-power-mode-resume.service"
+AUTORUN_DESKTOP="${HOME}/.config/autostart/run-3-2-power-mode-resume.desktop"
+AUTORUN_TERMINAL_SCRIPT="${HOME}/.local/bin/run_3_2_power_mode_resume_terminal.sh"
 POWER_LIST_CMD="awk -F'[= ]' '/^< POWER_MODEL/{print \$4,\$6}' /etc/nvpmodel.conf"
 FREQ_CMD="sudo jetson_clocks --show | awk '/^cpu/&&/Online=1/||/^GPU|^EMC/{for(i=1;i<=NF;i++)if(\$i~/^MaxFreq=/)print \$1,\$i}'"
 
@@ -205,36 +209,68 @@ clear_state() {
   rm -f "${STATE_FILE}"
 }
 
+start_transcript_log() {
+  if [[ "${TRANSCRIPT_STARTED}" == "1" ]]; then
+    return
+  fi
+
+  TRANSCRIPT_FILE="${LOG_DIR}/3-2_power_mode_full.log"
+  touch "${TRANSCRIPT_FILE}"
+  export TRANSCRIPT_STARTED=1
+  exec > >(tee -a "${TRANSCRIPT_FILE}") 2>&1
+
+  echo
+  echo "===== 3-2 transcript started: $(date --iso-8601=seconds) ====="
+  echo "Transcript log: ${TRANSCRIPT_FILE}"
+  if [[ "${AUTO_RESUME}" == "1" ]]; then
+    echo "Resume source: terminal auto-resume after reboot"
+  else
+    echo "Resume source: manual run before reboot"
+  fi
+}
+
 install_autoresume_service() {
-  local workdir user_name home_dir service_path
+  local workdir home_dir terminal_cmd autostart_dir
 
   workdir="$(pwd)"
-  user_name="$(id -un)"
   home_dir="${HOME}"
-  service_path="/etc/systemd/system/${AUTORUN_SERVICE}"
+  autostart_dir="${home_dir}/.config/autostart"
+  terminal_cmd="gnome-terminal -- bash -lc"
 
-  echo "Enable auto-resume after reboot: ${AUTORUN_SERVICE}"
-  sudo tee "${service_path}" >/dev/null <<EOF
-[Unit]
-Description=Resume 3-2 Power Mode Test
-After=multi-user.target
+  mkdir -p "${autostart_dir}" "$(dirname "${AUTORUN_TERMINAL_SCRIPT}")"
+  sudo systemctl disable "${AUTORUN_SERVICE}" >/dev/null 2>&1 || true
+  sudo rm -f "/etc/systemd/system/${AUTORUN_SERVICE}" 2>/dev/null || true
+  sudo systemctl daemon-reload >/dev/null 2>&1 || true
 
-[Service]
-Type=oneshot
-Environment=HOME=${home_dir}
-Environment=USER=${user_name}
-Environment=AUTO_RESUME=1
-WorkingDirectory=${workdir}
-ExecStart=/bin/bash -lc './${SCRIPT_NAME} >> ${home_dir}/3-2_power_mode_autoresume.log 2>&1'
-
-[Install]
-WantedBy=multi-user.target
+  echo "Enable terminal auto-resume after reboot: ${AUTORUN_DESKTOP}"
+  cat > "${AUTORUN_TERMINAL_SCRIPT}" <<EOF
+#!/usr/bin/env bash
+cd '${workdir}' || exit 1
+export AUTO_RESUME=1
+./'${SCRIPT_NAME}'
+rc=\$?
+echo
+echo "3-2 Power Mode resume finished. Exit code: \${rc}"
+echo "Press Enter to close this terminal."
+read -r _
+exit "\${rc}"
 EOF
-  sudo systemctl daemon-reload
-  sudo systemctl enable "${AUTORUN_SERVICE}" >/dev/null
+  chmod +x "${AUTORUN_TERMINAL_SCRIPT}"
+
+  cat > "${AUTORUN_DESKTOP}" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Resume 3-2 Power Mode Test
+Comment=Open terminal and resume 3-2 power mode test after reboot
+Exec=${terminal_cmd} '${AUTORUN_TERMINAL_SCRIPT}'
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
 }
 
 disable_autoresume_service() {
+  rm -f "${AUTORUN_DESKTOP}" "${AUTORUN_TERMINAL_SCRIPT}" 2>/dev/null || true
+
   if command -v systemctl >/dev/null 2>&1; then
     sudo systemctl disable "${AUTORUN_SERVICE}" >/dev/null 2>&1 || true
     sudo rm -f "/etc/systemd/system/${AUTORUN_SERVICE}" 2>/dev/null || true
@@ -428,14 +464,14 @@ print_final_report() {
 main() {
   local i mode_id mode_name switch_rc next_i pending_reboot_ids progress_made all_done first_pending
 
-  check_orin_series
-
   need_cmd awk || die "awk not found"
   need_cmd sudo || die "sudo not found"
   need_cmd nvpmodel || die "nvpmodel not found"
   need_cmd jetson_clocks || die "jetson_clocks not found"
 
   load_or_init_state
+  start_transcript_log
+  check_orin_series
   show_header
 
   if [[ ! -s "${RESULT_FILE}" || "${NEXT_INDEX}" == "0" ]]; then
