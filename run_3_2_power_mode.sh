@@ -65,11 +65,11 @@ get_mode_name() {
 }
 
 get_current_mode_id() {
-  sudo nvpmodel -q 2>/dev/null | awk '/^[0-9]+$/ {print $1; exit}'
+  nvpmodel -q 2>/dev/null | awk '/^[0-9]+$/ {print $1; exit}'
 }
 
 get_current_mode_name() {
-  sudo nvpmodel -q 2>/dev/null | awk -F': ' '/NV Power Mode:/ {print $2; exit}'
+  nvpmodel -q 2>/dev/null | awk -F': ' '/NV Power Mode:/ {print $2; exit}'
 }
 
 read_model() {
@@ -181,8 +181,8 @@ append_current_mode_record() {
     echo
     echo "===== Power Mode: ${requested_id} ${requested_name} ====="
     echo
-    echo "sudo nvpmodel -q"
-    sudo nvpmodel -q 2>&1 || true
+    echo "nvpmodel -q"
+    nvpmodel -q 2>&1 || true
     echo
     sudo jetson_clocks --show 2>&1 | awk '/^cpu/&&/Online=1/||/^GPU|^EMC/{for(i=1;i<=NF;i++)if($i~/^MaxFreq=/)print $1,$i}'
   } >> "${RESULT_FILE}"
@@ -487,7 +487,7 @@ main() {
   run_power_list
   echo
   echo "Current mode:"
-  sudo nvpmodel -q || true
+  nvpmodel -q || true
 
   while :; do
     pending_reboot_ids=()
