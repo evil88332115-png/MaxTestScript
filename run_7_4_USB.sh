@@ -105,7 +105,55 @@ cleanup() {
   fi
 }
 
-trap cleanup EXIT INT TERM
+safe_usb_poweroff() {
+  local parent_name parent_device
+
+  if [[ -z "${USB_DEVICE:-}" ]]; then
+    return 0
+  fi
+
+  echo
+  echo "======================================"
+  echo "7.4 USB - Safe Unmount / Power Off"
+  echo "Command: sync"
+  echo "Command: udisksctl unmount -b ${USB_DEVICE}"
+  echo "Command: udisksctl power-off -b <parent USB disk>"
+  echo "======================================"
+
+  sync || true
+
+  if findmnt -rn --source "${USB_DEVICE}" >/dev/null 2>&1; then
+    if udisksctl unmount -b "${USB_DEVICE}"; then
+      echo "OK: ${USB_DEVICE} unmounted"
+    else
+      echo "WARN: failed to unmount ${USB_DEVICE}" >&2
+    fi
+  else
+    echo "INFO: ${USB_DEVICE} is not mounted"
+  fi
+
+  parent_name="$(lsblk -no PKNAME "${USB_DEVICE}" 2>/dev/null | head -n 1 || true)"
+  if [[ -n "${parent_name}" ]]; then
+    parent_device="/dev/${parent_name}"
+    if udisksctl power-off -b "${parent_device}"; then
+      echo "OK: ${parent_device} powered off"
+    else
+      echo "WARN: failed to power off ${parent_device}" >&2
+    fi
+  else
+    echo "WARN: cannot find parent disk for ${USB_DEVICE}" >&2
+  fi
+}
+
+finish() {
+  local exit_code=$?
+  trap - EXIT INT TERM
+  cleanup
+  safe_usb_poweroff
+  exit "${exit_code}"
+}
+
+trap finish EXIT INT TERM
 
 echo "7.4 USB Storage Test"
 echo
