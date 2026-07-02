@@ -474,7 +474,7 @@ main() {
   check_orin_series
   show_header
 
-  if [[ ! -s "${RESULT_FILE}" || "${NEXT_INDEX}" == "0" ]]; then
+  if [[ ! -s "${RESULT_FILE}" ]]; then
     write_initial_report
     NEXT_INDEX="$(first_unrecorded_index)"
     save_state "${NEXT_INDEX}" "${MODE_IDS[*]}" "${LOG_DIR}"
