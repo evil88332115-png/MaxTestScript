@@ -79,17 +79,10 @@ while true; do
   lsusb -t
   echo
   echo "======================================="
-  echo "Stop USB auto unmount until next reboot:"
-  echo "sudo systemctl stop usb-auto-safe-umount.service"
-  echo
-  echo "Disable USB auto unmount after reboot:"
+  echo "Return to normal mode:"
   echo "sudo systemctl disable --now usb-auto-safe-umount.service"
-  echo
-  echo "Stop opening this terminal on login:"
   echo "mv ~/.config/autostart/usb-monitor-terminal.desktop ~/.config/autostart/usb-monitor-terminal.desktop.disabled"
-  echo
-  echo "Stop USB background log service:"
-  echo "sudo systemctl stop usb-monitor.service"
+  echo "sudo systemctl disable --now usb-monitor.service"
   echo "======================================="
   sleep 1
 done
