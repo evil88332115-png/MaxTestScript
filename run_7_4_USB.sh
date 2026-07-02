@@ -113,7 +113,7 @@ repair_filesystem() {
     vfat|fat|fat16|fat32|msdos)
       if command -v fsck.vfat >/dev/null 2>&1; then
         echo "Repairing FAT filesystem on $device ..."
-        fsck.vfat -a "$device"
+        sudo fsck.vfat -a "$device"
       else
         echo "WARN: fsck.vfat not found; skip repair for $device"
       fi
@@ -121,7 +121,7 @@ repair_filesystem() {
     exfat)
       if command -v fsck.exfat >/dev/null 2>&1; then
         echo "Repairing exFAT filesystem on $device ..."
-        fsck.exfat -a "$device"
+        sudo fsck.exfat -a "$device"
       else
         echo "WARN: fsck.exfat not found; skip repair for $device"
       fi
@@ -129,7 +129,7 @@ repair_filesystem() {
     ext2|ext3|ext4)
       if command -v fsck >/dev/null 2>&1; then
         echo "Repairing $filesystem filesystem on $device ..."
-        fsck -y "$device"
+        sudo fsck -y "$device"
       else
         echo "WARN: fsck not found; skip repair for $device"
       fi
