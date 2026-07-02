@@ -16,7 +16,7 @@ else
 fi
 
 scan_usb_mounts() {
-  lsblk -P -o NAME,PATH,TYPE,TRAN,RM,SIZE,FSTYPE,MOUNTPOINTS 2>/dev/null |
+  lsblk -P -o NAME,PATH,TYPE,PKNAME,TRAN,RM,SIZE,FSTYPE,MOUNTPOINTS 2>/dev/null |
     awk '
       {
         delete value
@@ -31,12 +31,21 @@ scan_usb_mounts() {
           $0 = substr($0, RSTART + RLENGTH)
         }
 
+        if (value["TYPE"] == "disk") {
+          disk_transport[value["NAME"]] = value["TRAN"]
+          disk_removable[value["NAME"]] = value["RM"]
+        }
+
+        parent_transport = disk_transport[value["PKNAME"]]
+        parent_removable = disk_removable[value["PKNAME"]]
+
         if (value["TYPE"] == "part" &&
             value["MOUNTPOINTS"] != "" &&
-            (value["TRAN"] == "usb" || value["RM"] == "1")) {
+            (value["TRAN"] == "usb" || parent_transport == "usb" ||
+             value["RM"] == "1" || parent_removable == "1")) {
           printf "%s|%s|%s|%s|%s\n",
             value["PATH"], value["MOUNTPOINTS"], value["SIZE"],
-            value["FSTYPE"], value["TRAN"]
+            value["FSTYPE"], (value["TRAN"] != "" ? value["TRAN"] : parent_transport)
         }
       }
     '
