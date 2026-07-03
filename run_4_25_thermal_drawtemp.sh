@@ -273,12 +273,22 @@ build_gst_command() {
   source_element="filesrc"
   source_prop="location=$source"
 
-  GST_CMD=(
-    gst-launch-1.0 -e
-    "$source_element" "$source_prop" !
-    "$demux" name=demux
-    demux.video_0 ! queue ! "$parser" ! nvv4l2decoder ! nvvidconv ! nv3dsink sync="$DISPLAY_SYNC"
-  )
+  if [[ "${AUDIO_CODEC:-none}" != "none" ]]; then
+    GST_CMD=(
+      gst-launch-1.0 -e
+      "$source_element" "$source_prop" !
+      "$demux" name=demux
+      demux.video_0 ! queue ! "$parser" ! nvv4l2decoder ! nvvidconv ! nv3dsink sync="$DISPLAY_SYNC"
+      demux.audio_0 ! queue ! decodebin ! audioconvert ! audioresample ! autoaudiosink
+    )
+  else
+    GST_CMD=(
+      gst-launch-1.0 -e
+      "$source_element" "$source_prop" !
+      "$demux" name=demux
+      demux.video_0 ! queue ! "$parser" ! nvv4l2decoder ! nvvidconv ! nv3dsink sync="$DISPLAY_SYNC"
+    )
+  fi
 }
 
 parse_tegrastats_csv() {
