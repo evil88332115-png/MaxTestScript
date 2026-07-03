@@ -92,34 +92,43 @@ run_client_test() {
 
 parse_iperf_summary() {
   local log_file="$1"
-  local totals line_no=0 label bandwidth
+  local parsed label bandwidth line
 
-  totals="$(awk -v duration="${TEST_DURATION}" '
+  parsed="$(awk -v duration="${TEST_DURATION}" '
+    /\[[ ]*[0-9]+\] local / && / connected with / {
+      id = $2
+      gsub(/\]/, "", id)
+      direction[id] = ($6 == "5001") ? "Receive" : "Send"
+    }
     $0 ~ "\\[ *[0-9]+\\]" && $0 ~ "0\\.0000-" && $0 ~ "Bytes" && $0 ~ "bits/sec" {
-      lines[++count] = $0
+      id = $2
+      gsub(/\]/, "", id)
+      interval = $3
+      split(interval, parts, "-")
+      end_time = parts[2] + 0
+      if (end_time >= duration * 0.8) {
+        total[id] = $0
+      }
     }
     END {
-      start = count > 2 ? count - 1 : 1
-      for (i = start; i <= count; i++) {
-        if (lines[i] != "") print lines[i]
+      for (id in total) {
+        label = direction[id]
+        if (label == "") label = "Unknown"
+        print label "|" total[id]
       }
     }
   ' "${log_file}")"
 
-  while IFS= read -r line; do
-    [[ -z "${line}" ]] && continue
-    line_no=$((line_no + 1))
-    if [[ "${line_no}" -eq 1 ]]; then
-      label="Send"
-    else
-      label="Receive"
-    fi
+  while IFS='|' read -r label line; do
+    [[ -z "${label}" || -z "${line}" ]] && continue
     bandwidth="$(awk '{ print $(NF-1) " " $NF }' <<< "${line}")"
     IPERF_SUMMARY+=("${label}|${bandwidth}|${line}")
-  done <<< "${totals}"
+  done <<< "${parsed}"
 }
 
 print_summary() {
+  local wanted result label bandwidth line found
+
   echo
   printf '%s========================================%s\n' "${YELLOW}" "${RESET}"
   printf '%s       ETHERNET IPERF BANDWIDTH%s\n' "${YELLOW}" "${RESET}"
@@ -130,9 +139,18 @@ print_summary() {
     return 1
   fi
 
-  for result in "${IPERF_SUMMARY[@]}"; do
-    IFS='|' read -r label bandwidth line <<< "${result}"
-    printf '%sIPERF %-7s %12s%s\n' "${GREEN}" "${label}" "${bandwidth}" "${RESET}"
+  for wanted in Send Receive; do
+    found=0
+    for result in "${IPERF_SUMMARY[@]}"; do
+      IFS='|' read -r label bandwidth line <<< "${result}"
+      if [[ "${label}" == "${wanted}" ]]; then
+        printf '%sIPERF %-7s %12s%s\n' "${GREEN}" "${label}" "${bandwidth}" "${RESET}"
+        found=1
+      fi
+    done
+    if [[ "${found}" -eq 0 ]]; then
+      printf 'IPERF %-7s %12s\n' "${wanted}" "N/A"
+    fi
   done
 
   printf '%s========================================%s\n' "${YELLOW}" "${RESET}"
