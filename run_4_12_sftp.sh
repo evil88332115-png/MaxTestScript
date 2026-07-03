@@ -8,11 +8,15 @@ TRANSFER_PAUSE_SECONDS="${TRANSFER_PAUSE_SECONDS:-5}"
 
 if [[ -t 1 ]]; then
   COLOR_RESULT=$'\033[1;32m'
+  COLOR_WARN=$'\033[1;33m'
   COLOR_RESET=$'\033[0m'
 else
   COLOR_RESULT=""
+  COLOR_WARN=""
   COLOR_RESET=""
 fi
+
+declare -a SFTP_SUMMARY=()
 
 install_local_tools() {
   local missing=()
@@ -104,7 +108,7 @@ run_sftp_transfer() {
   local label="$1"
   local mib="$2"
   local command="$3"
-  local output status start_ns end_ns elapsed_s rate_mib
+  local output status start_ns end_ns elapsed_s rate_mib rate_mib_value direction
 
   echo "=== ${label} ==="
   echo "Command: ${command}"
@@ -127,10 +131,44 @@ run_sftp_transfer() {
   fi
 
   elapsed_s="$(awk -v start="${start_ns}" -v end="${end_ns}" 'BEGIN { printf "%.3f", (end - start) / 1000000000 }')"
-  rate_mib="$(awk -v mib="${mib}" -v sec="${elapsed_s}" 'BEGIN { if (sec > 0) printf "%.2f MiB/s", mib / sec; else print "N/A" }')"
+  rate_mib_value="$(awk -v mib="${mib}" -v sec="${elapsed_s}" 'BEGIN { if (sec > 0) printf "%.2f", mib / sec; else print "N/A" }')"
+  if [[ "${rate_mib_value}" == "N/A" ]]; then
+    rate_mib="N/A"
+  else
+    rate_mib="${rate_mib_value} MiB/s"
+  fi
+
+  case "${label}" in
+    GET*) direction="Receive" ;;
+    PUT*) direction="Send" ;;
+    *) direction="${label}" ;;
+  esac
+  SFTP_SUMMARY+=("${direction}|${rate_mib}|${label}")
+
   printf 'Elapsed: %s s\n' "${elapsed_s}"
   printf '%sRESULT,%s,%s s,%s%s\n' "${COLOR_RESULT}" "${label}" "${elapsed_s}" "${rate_mib}" "${COLOR_RESET}"
   echo
+}
+
+print_sftp_summary() {
+  local result direction rate_mib label
+
+  echo
+  printf '%s========================================%s\n' "${COLOR_WARN}" "${COLOR_RESET}"
+  printf '%s       SFTP TRANSFER BANDWIDTH%s\n' "${COLOR_WARN}" "${COLOR_RESET}"
+  printf '%s========================================%s\n' "${COLOR_WARN}" "${COLOR_RESET}"
+
+  if [[ "${#SFTP_SUMMARY[@]}" -eq 0 ]]; then
+    echo "No completed SFTP transfer results."
+  else
+    for result in "${SFTP_SUMMARY[@]}"; do
+      IFS='|' read -r direction rate_mib label <<< "${result}"
+      printf '%sSFTP %-7s %12s  (%s)%s\n' \
+        "${COLOR_RESULT}" "${direction}" "${rate_mib}" "${label}" "${COLOR_RESET}"
+    done
+  fi
+
+  printf '%s========================================%s\n' "${COLOR_WARN}" "${COLOR_RESET}"
 }
 
 run_upload() {
@@ -289,6 +327,6 @@ fi
 
 echo "Summary"
 echo "-------"
-echo "Review the RESULT lines above for SFTP transfer speed."
+print_sftp_summary
 echo "Local directory: ${LOCAL_DIR}"
 echo "Remote directory: ${SERVER_USER}@${SERVER_IP}:${REMOTE_DIR}"

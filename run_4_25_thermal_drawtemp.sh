@@ -29,6 +29,8 @@ TEGRATS_INTERVAL_MS="${TEGRATS_INTERVAL_MS:-1000}"
 DISPLAY_SYNC="${DISPLAY_SYNC:-true}"
 FORCE_FULLSCREEN="${FORCE_FULLSCREEN:-true}"
 STOP_REQUESTED=false
+INTERRUPT_COUNT=0
+TEST_RUNNING=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRAW_TEMP_SCRIPT="${DRAW_TEMP_SCRIPT:-${SCRIPT_DIR}/drawtempcurve_auto.py}"
 DRAW_TEMP_MODE="cpu_gpu"
@@ -82,8 +84,23 @@ cleanup() {
   fi
 }
 handle_interrupt() {
+  INTERRUPT_COUNT=$((INTERRUPT_COUNT + 1))
   echo ""
+
+  if [[ "${INTERRUPT_COUNT}" -ge 2 ]]; then
+    echo "Second stop requested. Exiting now."
+    cleanup
+    exit 130
+  fi
+
+  if [[ "${TEST_RUNNING}" != "true" ]]; then
+    echo "Stop requested before test started. Exiting."
+    cleanup
+    exit 130
+  fi
+
   echo "Stop requested. Stopping playback and finishing current logs..."
+  echo "Press Ctrl+C again to exit immediately."
   cleanup
 }
 trap handle_interrupt INT TERM
@@ -324,6 +341,11 @@ setup_display
 
 select_source_mode
 
+if [[ "$STOP_REQUESTED" == "true" ]]; then
+  echo "Stop requested. Exiting before playback starts."
+  exit 130
+fi
+
 VIDEO_CODEC="$(probe_video_codec "$SOURCE")"
 AUDIO_CODEC="$(probe_audio_codec "$SOURCE")"
 FORMAT_NAME="$(probe_format "$SOURCE")"
@@ -357,6 +379,7 @@ echo "XAUTHORITY: ${XAUTHORITY:-not set}"
 print_command "${GST_CMD[@]}"
 
 set +e
+TEST_RUNNING=true
 timeout "${DURATION}" tegrastats --interval "${TEGRATS_INTERVAL_MS}" >"${TEGRATS_LOG}" 2>&1 &
 TEGRATS_PID=$!
 
