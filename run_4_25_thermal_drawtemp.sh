@@ -243,8 +243,11 @@ select_source_mode() {
         echo "Please mount NAS first and put TestVideo.mp4 at the expected path." >&2
         exit 1
       fi
-      if [[ -f "$VIDEO_DEST" ]] && [[ "$(stat -c %s "$VIDEO_DEST")" == "$(stat -c %s "$NAS_VIDEO")" ]]; then
+      if [[ -f "$VIDEO_DEST" ]]; then
         echo "Local test video already exists; skipping copy."
+        if [[ "$(stat -c %s "$VIDEO_DEST")" != "$(stat -c %s "$NAS_VIDEO")" ]]; then
+          echo "WARNING: Local video size differs from NAS video; using existing local file anyway."
+        fi
       else
         echo "Copying test video from NAS to local..."
         cp -f "$NAS_VIDEO" "$VIDEO_DEST"
