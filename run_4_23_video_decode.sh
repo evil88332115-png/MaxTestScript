@@ -24,6 +24,45 @@ file_uri() {
   printf 'file://%s' "${path}"
 }
 
+quote_cmd_arg() {
+  printf "%q" "$1"
+}
+
+format_seconds() {
+  local seconds="$1"
+
+  if [[ -z "${seconds}" || "${seconds}" == "N/A" ]]; then
+    echo "N/A"
+    return
+  fi
+
+  awk -v total="${seconds}" 'BEGIN {
+    total = int(total + 0.5)
+    h = int(total / 3600)
+    m = int((total % 3600) / 60)
+    s = total % 60
+    if (h > 0) {
+      printf "%d:%02d:%02d", h, m, s
+    } else {
+      printf "%02d:%02d", m, s
+    }
+  }'
+}
+
+get_duration_seconds() {
+  local file="$1"
+
+  if ! command -v ffprobe >/dev/null 2>&1; then
+    echo "N/A"
+    return
+  fi
+
+  ffprobe -v error \
+    -show_entries format=duration \
+    -of default=noprint_wrappers=1:nokey=1 \
+    "${file}" 2>/dev/null | awk 'NF && $1 > 0 { print $1; found=1; exit } END { if (!found) print "N/A" }'
+}
+
 setup_display() {
   local uid xauth
 
@@ -118,30 +157,117 @@ check_support_before_playback() {
 play_file() {
   local file="$1"
   local index="$2"
-  local base log status interrupted
+  local base log status interrupted duration duration_text start_ts now elapsed elapsed_text key player_pid action
+  local player_input_fifo player_input_fd
 
   base="$(basename "${file}")"
   log="${LOG_DIR}/${index}_${base}.log"
   interrupted=0
+  action="complete"
+  PLAY_ACTION="complete"
 
   echo "=== Playing ${base} ==="
+  duration="$(get_duration_seconds "${file}")"
+  duration_text="$(format_seconds "${duration}")"
+  echo "Duration: ${duration_text}"
+  echo "Controls: n=next, p=previous, q=quit"
   if ! check_support_before_playback "${file}"; then
+    PLAY_ACTION="complete"
     return 0
   fi
-  echo "If the screen is black, stuck, or not playing correctly, press Ctrl+C to skip this file and continue to the next one."
+  echo "If the screen is black, stuck, or not playing correctly, press n or Ctrl+C to skip this file."
+  printf 'Command: '
+  quote_cmd_arg "${PLAYER}"
+  printf ' -i '
+  quote_cmd_arg "$(file_uri "${file}")"
+  printf '\n'
+
+  player_input_fifo="$(mktemp -u /tmp/4_23_nvgstplayer_input_XXXXXX)"
+  mkfifo "${player_input_fifo}"
+  exec {player_input_fd}<>"${player_input_fifo}"
+
   set +e
-  trap 'interrupted=1' INT
-  if [[ -t 0 ]]; then
-    "${PLAYER}" -i "$(file_uri "${file}")" >"${log}" 2>&1
-    status="$?"
-  else
-    tail -f /dev/null | "${PLAYER}" -i "$(file_uri "${file}")" >"${log}" 2>&1
-    status="${PIPESTATUS[1]}"
-  fi
+  "${PLAYER}" -i "$(file_uri "${file}")" >"${log}" 2>&1 <"${player_input_fifo}" &
+  player_pid=$!
+  start_ts="$(date +%s)"
+  trap 'interrupted=1; action="next"; printf "q\n" >&'"${player_input_fd}"' 2>/dev/null || true; sleep 1; kill "${player_pid}" >/dev/null 2>&1 || true' INT
+
+  while kill -0 "${player_pid}" >/dev/null 2>&1; do
+    now="$(date +%s)"
+    elapsed=$((now - start_ts))
+    elapsed_text="$(format_seconds "${elapsed}")"
+    printf '\rProgress: %s / %s' "${elapsed_text}" "${duration_text}"
+
+    key=""
+    if [[ -t 0 ]] && read -r -s -n 1 -t 1 key; then
+      case "${key}" in
+        n|N)
+          action="next"
+          printf 'q\n' >&"${player_input_fd}" 2>/dev/null || true
+          sleep 1
+          kill "${player_pid}" >/dev/null 2>&1 || true
+          ;;
+        p|P)
+          action="previous"
+          printf 'q\n' >&"${player_input_fd}" 2>/dev/null || true
+          sleep 1
+          kill "${player_pid}" >/dev/null 2>&1 || true
+          ;;
+        q|Q)
+          action="quit"
+          printf 'q\n' >&"${player_input_fd}" 2>/dev/null || true
+          sleep 1
+          kill "${player_pid}" >/dev/null 2>&1 || true
+          ;;
+      esac
+    elif [[ ! -t 0 ]]; then
+      sleep 1
+    fi
+  done
+
+  wait "${player_pid}"
+  status="$?"
   trap - INT
+  exec {player_input_fd}>&-
+  rm -f "${player_input_fifo}"
   set -e
 
+  now="$(date +%s)"
+  elapsed=$((now - start_ts))
+  if [[ "${action}" == "complete" && "${duration}" != "N/A" ]]; then
+    elapsed_text="$(format_seconds "${duration}")"
+  else
+    elapsed_text="$(format_seconds "${elapsed}")"
+  fi
+  printf '\rProgress: %s / %s\n' "${elapsed_text}" "${duration_text}"
+
+  if [[ "${action}" == "next" ]]; then
+    PLAY_ACTION="next"
+    printf '%sSKIP: %s%s\n' "${COLOR_WARN}" "${base}" "${COLOR_RESET}"
+    printf 'RESULT,Video Decode,%s,SKIP\n' "${base}"
+    echo "Log: ${log}"
+    echo
+    return 0
+  fi
+
+  if [[ "${action}" == "previous" ]]; then
+    PLAY_ACTION="previous"
+    echo "Back to previous."
+    echo "Log: ${log}"
+    echo
+    return 0
+  fi
+
+  if [[ "${action}" == "quit" ]]; then
+    PLAY_ACTION="quit"
+    echo "Quit requested."
+    echo "Log: ${log}"
+    echo
+    return 0
+  fi
+
   if [[ "${interrupted}" -eq 1 || "${status}" -eq 130 ]]; then
+    PLAY_ACTION="next"
     printf '%sSKIP: %s%s\n' "${COLOR_WARN}" "${base}" "${COLOR_RESET}"
     printf 'RESULT,Video Decode,%s,SKIP\n' "${base}"
     echo "Log: ${log}"
@@ -150,6 +276,7 @@ play_file() {
   fi
 
   if [[ "${status}" -eq 0 ]]; then
+    PLAY_ACTION="complete"
     printf '%sRESULT,Video Decode,%s,PASS%s\n' "${COLOR_RESULT}" "${base}" "${COLOR_RESET}"
     echo "Log: ${log}"
     echo
@@ -164,7 +291,11 @@ play_file() {
   printf 'RESULT,Video Decode,%s,FAIL\n' "${base}"
   echo
 
-  prompt_continue
+  if prompt_continue; then
+    PLAY_ACTION="complete"
+    return 0
+  fi
+  return 1
 }
 
 echo "4.23 Video Decode test"
@@ -192,6 +323,8 @@ mkdir -p "${LOG_DIR}"
 echo "Player: $(command -v "${PLAYER}")"
 echo
 
+declare -a PLAYLIST_FILES=()
+declare -a PLAYLIST_INDEXES=()
 for index in ${INDEXES}; do
   mapfile -t matches < <(find "${VIDEO_DIR}" -maxdepth 1 -type f -name "TestFile${index}_*" | sort)
 
@@ -211,12 +344,43 @@ for index in ${INDEXES}; do
     exit 1
   fi
 
-  if ! play_file "${matches[0]}" "${index}"; then
+  PLAYLIST_FILES+=("${matches[0]}")
+  PLAYLIST_INDEXES+=("${index}")
+done
+
+current_index=0
+while [[ "${current_index}" -lt "${#PLAYLIST_FILES[@]}" ]]; do
+  PLAY_ACTION="complete"
+  if ! play_file "${PLAYLIST_FILES[${current_index}]}" "${PLAYLIST_INDEXES[${current_index}]}"; then
     exit 1
   fi
+
+  case "${PLAY_ACTION}" in
+    complete|next)
+      current_index=$((current_index + 1))
+      ;;
+    previous)
+      if [[ "${current_index}" -gt 0 ]]; then
+        current_index=$((current_index - 1))
+      else
+        current_index=0
+      fi
+      ;;
+    quit)
+      break
+      ;;
+    *)
+      echo "ERROR: Unknown playback action: ${PLAY_ACTION}" >&2
+      exit 1
+      ;;
+  esac
 done
 
 echo "Summary"
 echo "-------"
-echo "RESULT,Video Decode,${INDEXES},COMPLETE"
+if [[ "${current_index}" -ge "${#PLAYLIST_FILES[@]}" ]]; then
+  echo "RESULT,Video Decode,${INDEXES},COMPLETE"
+else
+  echo "RESULT,Video Decode,${INDEXES},STOPPED"
+fi
 echo "Logs: ${LOG_DIR}"
