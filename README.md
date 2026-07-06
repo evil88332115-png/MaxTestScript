@@ -88,6 +88,7 @@ Some scripts are interactive and may ask for interface selection, server IP, pas
 | `run_4_25_thermal_drawtemp.sh` | Thermal test with hardware decode playback and CPU+GPU temperature curve output |
 | `drawtempcurve_auto.py` | Temperature curve drawing helper |
 | `run_5_4_rtc.sh` | Interactive RTC/timezone/shutdown test |
+| `run_5_5_display_resolution.sh` | Play a video while switching display resolutions by operator Enter confirmation |
 | `run_7_1_coremark.sh` | CoreMark-PRO clone/build/run script |
 | `run_7_2_memory.sh` | sysbench memory read/write test |
 | `run_7_3_nvme_ssd.sh` | NVMe SSD dd read/write test |
