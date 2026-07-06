@@ -36,6 +36,28 @@ csv_escape() {
   printf '"%s"' "${value}"
 }
 
+format_elapsed() {
+  local total="$1"
+  local hours minutes seconds
+
+  if [[ ! "${total}" =~ ^[0-9]+$ ]]; then
+    printf '%s' "${total}"
+    return
+  fi
+
+  hours=$((total / 3600))
+  minutes=$(((total % 3600) / 60))
+  seconds=$((total % 60))
+
+  if [[ "${hours}" -gt 0 ]]; then
+    printf '%dh %dm %ds' "${hours}" "${minutes}" "${seconds}"
+  elif [[ "${minutes}" -gt 0 ]]; then
+    printf '%dm %ds' "${minutes}" "${seconds}"
+  else
+    printf '%ds' "${seconds}"
+  fi
+}
+
 default_route_info() {
   ip -4 route show default 2>/dev/null | head -n 1
 }
@@ -230,6 +252,7 @@ for i in "${!URLS[@]}"; do
     fi
   fi
   elapsed="$(( $(date +%s) - start_time ))"
+  elapsed_text="$(format_elapsed "${elapsed}")"
   speed="$(extract_speed "${log}")"
 
   if [[ "${number}" -eq 6 && -z "${speed}" && "${rc}" -eq 0 && "${elapsed}" -gt 0 ]]; then
@@ -247,15 +270,15 @@ for i in "${!URLS[@]}"; do
   if [[ "${rc}" -eq 0 ]]; then
     status="PASS"
     pass="$((pass + 1))"
-    printf '%sRESULT,INTERNET_DOWNLOAD,%s/%s,PASS,interface=%s,speed=%s,time=%ss%s\n' \
+    printf '%sRESULT,INTERNET_DOWNLOAD,%s/%s,PASS,interface=%s,speed=%s,time=%s%s\n' \
       "${COLOR_PASS}" "${number}" "${#URLS[@]}" "${route_interface}" \
-      "${speed:-unknown}" "${elapsed}" "${COLOR_RESET}"
+      "${speed:-unknown}" "${elapsed_text}" "${COLOR_RESET}"
   else
     status="FAIL"
     fail="$((fail + 1))"
-    printf '%sRESULT,INTERNET_DOWNLOAD,%s/%s,FAIL,interface=%s,rc=%s,time=%ss%s\n' \
+    printf '%sRESULT,INTERNET_DOWNLOAD,%s/%s,FAIL,interface=%s,rc=%s,time=%s%s\n' \
       "${COLOR_FAIL}" "${number}" "${#URLS[@]}" "${route_interface}" \
-      "${rc}" "${elapsed}" "${COLOR_RESET}" >&2
+      "${rc}" "${elapsed_text}" "${COLOR_RESET}" >&2
     tail -n 20 "${log}" >&2 || true
   fi
 
@@ -263,7 +286,7 @@ for i in "${!URLS[@]}"; do
   RESULT_INTERFACES[$i]="${route_interface}"
   RESULT_STATUSES[$i]="${status}"
   RESULT_SPEEDS[$i]="${speed:-unknown}"
-  RESULT_TIMES[$i]="${elapsed}s"
+  RESULT_TIMES[$i]="${elapsed_text}"
 
   {
     csv_escape "${number}"; printf ','

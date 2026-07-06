@@ -23,6 +23,7 @@ set -euo pipefail
 
 NAS_VIDEO="${NAS_VIDEO:-/mnt/nas_home/TestVideo.mp4}"
 VIDEO_DEST="${VIDEO_DEST:-${HOME}/TestVideo.mp4}"
+SOURCE_MODE="${SOURCE_MODE:-}"
 LOG_DIR="${LOG_DIR:-${HOME}/4-25_thermal_$(date +%Y%m%d_%H%M%S)}"
 DURATION="${DURATION:-30m}"
 TEGRATS_INTERVAL_MS="${TEGRATS_INTERVAL_MS:-1000}"
@@ -214,16 +215,39 @@ get_demux() {
 }
 
 select_source_mode() {
-  local choice input
-  echo ""
-  echo "Playback source mode:"
-  echo "1) Download/copy NAS video to local and play local file"
-  echo "2) Direct playback from same NAS video path, no local copy"
-  read -r -p "Select [1/2]: " choice
+  local choice
 
-  case "$choice" in
-    2)
-      SOURCE_MODE="nas_direct"
+  echo ""
+  if [[ -n "${SOURCE_MODE}" ]]; then
+    case "${SOURCE_MODE}" in
+      local|nas|streaming|nas_direct) ;;
+      *)
+        echo "ERROR: unsupported SOURCE_MODE=${SOURCE_MODE}. Use local or streaming." >&2
+        exit 1
+        ;;
+    esac
+  elif [[ ! -t 0 ]]; then
+    SOURCE_MODE="local"
+    echo "Non-interactive shell; defaulting source mode to local copy."
+  else
+    echo "Playback source mode:"
+    echo "1) Copy selected NAS videos to local and play local files (recommended)"
+    echo "2) Direct NAS streaming from ${NAS_VIDEO}"
+    read -r -p "Select [1/2, default 1]: " choice
+    case "$choice" in
+      2) SOURCE_MODE="streaming" ;;
+      *) SOURCE_MODE="local" ;;
+    esac
+  fi
+
+  if [[ "${SOURCE_MODE}" == "nas" ]]; then
+    SOURCE_MODE="streaming"
+  fi
+
+  echo "Playback source mode: ${SOURCE_MODE}"
+  case "$SOURCE_MODE" in
+    streaming|nas_direct)
+      SOURCE_MODE="streaming"
       echo "NAS video: $NAS_VIDEO"
       if [[ ! -f "$NAS_VIDEO" ]]; then
         echo "ERROR: NAS video not found: $NAS_VIDEO" >&2
@@ -234,8 +258,7 @@ select_source_mode() {
       SOURCE="$NAS_VIDEO"
       SOURCE_LABEL="$NAS_VIDEO"
       ;;
-    *)
-      SOURCE_MODE="local"
+    local)
       echo "NAS video: $NAS_VIDEO"
       echo "Local video: $VIDEO_DEST"
       if [[ ! -f "$NAS_VIDEO" ]]; then

@@ -9,21 +9,23 @@ set -euo pipefail
 # move to the next resolution.
 #
 # Defaults:
-#   NAS video:   /mnt/nas_home/TestVideo.mp4
-#   Local video: ~/TestVideo.mp4
+#   NAS video:   /mnt/nas_home/TestVideo1.mp4
+#   Local video: ~/TestVideo1.mp4
 # ============================================================
 
-NAS_VIDEO="${NAS_VIDEO:-/mnt/nas_home/TestVideo.mp4}"
-VIDEO_DEST="${VIDEO_DEST:-${HOME}/TestVideo.mp4}"
-VIDEO_URL="${VIDEO_URL:-https://download.samplelib.com/mp4/sample-30s.mp4}"
+NAS_VIDEO="${NAS_VIDEO:-/mnt/nas_home/TestVideo1.mp4}"
+VIDEO_DEST="${VIDEO_DEST:-${HOME}/TestVideo1.mp4}"
 LOG_DIR="${LOG_DIR:-/tmp/display_resolution_5_5_logs}"
-PLAYER="${PLAYER:-gst-launch-1.0}"
+PLAYER="${PLAYER:-nvgstplayer-1.0}"
+PLAYER_GST_FLAGS="${PLAYER_GST_FLAGS:---gst-disable-segtrap --gst-disable-registry-fork}"
 DISPLAY_SYNC="${DISPLAY_SYNC:-true}"
 AUTO_ADVANCE_SECONDS="${AUTO_ADVANCE_SECONDS:-}"
 VERIFY_TIMEOUT_SECONDS="${VERIFY_TIMEOUT_SECONDS:-8}"
 VERIFY_INTERVAL_SECONDS="${VERIFY_INTERVAL_SECONDS:-1}"
 MIN_WIDTH="${MIN_WIDTH:-720}"
 MIN_HEIGHT="${MIN_HEIGHT:-576}"
+MAX_WIDTH="${MAX_WIDTH:-0}"
+MAX_HEIGHT="${MAX_HEIGHT:-0}"
 MODE_SOURCE="unknown"
 GNOME_INTERFACE_SCHEMA="org.gnome.desktop.interface"
 GNOME_MUTTER_SCHEMA="org.gnome.mutter"
@@ -102,17 +104,11 @@ ensure_video_file() {
     return 0
   fi
 
-  echo "Local playback video not found: ${VIDEO_DEST}"
-  echo "NAS playback video not found: ${NAS_VIDEO}"
-  echo "Downloading playback video:"
-  echo "  URL: ${VIDEO_URL}"
-  echo "  To:  ${VIDEO_DEST}"
-
-  require_cmd wget
-  wget -O "${VIDEO_DEST}.download" "${VIDEO_URL}"
-  mv -f "${VIDEO_DEST}.download" "${VIDEO_DEST}"
-  sync "${VIDEO_DEST}" || true
-  ls -lh "${VIDEO_DEST}"
+  echo "ERROR: playback video not found." >&2
+  echo "Local file: ${VIDEO_DEST}" >&2
+  echo "NAS file:   ${NAS_VIDEO}" >&2
+  echo "Please mount NAS and place TestVideo1.mp4 at the NAS path, or set NAS_VIDEO=/path/to/video." >&2
+  exit 1
 }
 
 get_connected_output() {
@@ -166,12 +162,14 @@ list_resolutions_from_mutter_desc() {
     --dest org.gnome.Mutter.DisplayConfig \
     --object-path /org/gnome/Mutter/DisplayConfig \
     --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null \
-    | python3 - "$output" "$MIN_WIDTH" "$MIN_HEIGHT" <<'PY'
+    | python3 - "$output" "$MIN_WIDTH" "$MIN_HEIGHT" "$MAX_WIDTH" "$MAX_HEIGHT" <<'PY'
 import re
 import sys
 
 min_width = int(sys.argv[2])
 min_height = int(sys.argv[3])
+max_width = int(sys.argv[4])
+max_height = int(sys.argv[5])
 text = sys.stdin.read()
 
 pattern = re.compile(
@@ -189,6 +187,10 @@ for mode_id, width, height, refresh, props in pattern.findall(text):
     except ValueError:
         continue
     if w < min_width or h < min_height:
+        continue
+    if max_width > 0 and w > max_width:
+        continue
+    if max_height > 0 and h > max_height:
         continue
 
     resolution = f"{w}x{h}"
@@ -210,8 +212,12 @@ PY
 
 list_resolutions_from_xrandr_filtered_desc() {
   local output="$1"
-  list_resolutions_desc "$output" | awk -F'x' -v min_w="$MIN_WIDTH" -v min_h="$MIN_HEIGHT" '
-    $1 >= min_w && $2 >= min_h { print $0 }
+  list_resolutions_desc "$output" | awk -F'x' \
+    -v min_w="$MIN_WIDTH" -v min_h="$MIN_HEIGHT" \
+    -v max_w="$MAX_WIDTH" -v max_h="$MAX_HEIGHT" '
+    $1 >= min_w && $2 >= min_h &&
+    (max_w <= 0 || $1 <= max_w) &&
+    (max_h <= 0 || $2 <= max_h) { print $0 }
   '
 }
 
@@ -289,33 +295,41 @@ start_playback_loop() {
   {
     echo "Playback source: ${source}"
     echo "Playback URI: ${uri}"
-    echo "Player: ${PLAYER}"
+    echo "Player: ${PLAYER} ${PLAYER_GST_FLAGS} -i"
     echo "Started: $(date --iso-8601=seconds)"
     echo
   } >"${log}"
 
   (
     child_pid=""
+    input_fifo="$(mktemp -u /tmp/5_5_nvgstplayer_input_XXXXXX)"
+    mkfifo "${input_fifo}"
+    exec {input_fd}<>"${input_fifo}"
+
     stop_child() {
       if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
+        printf 'q\n' >&"${input_fd}" 2>/dev/null || true
         kill -TERM "${child_pid}" 2>/dev/null || true
         sleep 1
         kill -KILL "${child_pid}" 2>/dev/null || true
       fi
+      exec {input_fd}>&- 2>/dev/null || true
+      rm -f "${input_fifo}"
       exit 0
     }
     trap stop_child TERM INT
+
+    read -r -a player_gst_flags <<<"${PLAYER_GST_FLAGS}"
     while [[ "${PLAYBACK_STOP_REQUESTED}" != "true" ]]; do
-      if [[ "${PLAYER}" == "gst-launch-1.0" ]]; then
-        gst-launch-1.0 -e playbin uri="${uri}" video-sink="nv3dsink sync=${DISPLAY_SYNC}" >>"${log}" 2>&1 &
-      else
-        "${PLAYER}" -i "${uri}" >>"${log}" 2>&1 &
-      fi
+      "${PLAYER}" "${player_gst_flags[@]}" -i "${uri}" >>"${log}" 2>&1 <"${input_fifo}" &
       child_pid=$!
       wait "${child_pid}" || true
       child_pid=""
       sleep 1
     done
+
+    exec {input_fd}>&- 2>/dev/null || true
+    rm -f "${input_fifo}"
   ) &
   PLAYBACK_PID=$!
   echo "Playback started in background. PID: ${PLAYBACK_PID}"
@@ -334,10 +348,10 @@ stop_playback() {
 
 cleanup() {
   stop_playback
-  if [[ -n "${OUTPUT:-}" && -n "${MAX_RESOLUTION:-}" ]]; then
+  if [[ -n "${OUTPUT:-}" && -n "${ORIGINAL_RESOLUTION:-}" ]]; then
     echo ""
-    echo "Returning to maximum resolution: ${MAX_RESOLUTION}"
-    xrandr --display "$DISPLAY" --output "$OUTPUT" --mode "$MAX_RESOLUTION" --scale 1x1 2>/dev/null || true
+    echo "Returning to original resolution: ${ORIGINAL_RESOLUTION}"
+    xrandr --display "$DISPLAY" --output "$OUTPUT" --mode "$ORIGINAL_RESOLUTION" --scale 1x1 2>/dev/null || true
   fi
   restore_gnome_scaling
 }
@@ -386,10 +400,9 @@ echo "5-5 Display Resolution Test"
 echo "Host: $(hostname)"
 echo "Date: $(date --iso-8601=seconds)"
 echo "DISPLAY: ${DISPLAY}"
-echo "Minimum resolution: ${MIN_WIDTH}x${MIN_HEIGHT}"
+echo "Resolution range: ${MIN_WIDTH}x${MIN_HEIGHT} to ${MAX_WIDTH}x${MAX_HEIGHT}"
 echo "NAS video: ${NAS_VIDEO}"
 echo "Local video: ${VIDEO_DEST}"
-echo "Download URL: ${VIDEO_URL}"
 echo "Auto advance: ${AUTO_ADVANCE_SECONDS:-disabled}"
 echo "======================================"
 

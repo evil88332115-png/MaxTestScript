@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MEDIA_DIR="${MEDIA_DIR:-/mnt/nas_home/TEST FILE/FPS}"
+LOCAL_MEDIA_DIR="${LOCAL_MEDIA_DIR:-${HOME}/5_7_fps_media}"
 LOG_DIR="${LOG_DIR:-/tmp/fps_5_7_logs}"
 DURATION="${DURATION:-}"
 MODE="${MODE:-gst-launch-hwdecode}"
@@ -11,8 +12,9 @@ GST_LAUNCH="${GST_LAUNCH:-gst-launch-1.0}"
 FULL_PLAYER="${FULL_PLAYER:-nvgstplayer-1.0}"
 VIDEO_SINK="${VIDEO_SINK:-nv3dsink}"
 VIDEO_SYNC="${VIDEO_SYNC:-false}"
-AUDIO_SINK="${AUDIO_SINK:-fakesink}"
+AUDIO_SINK="${AUDIO_SINK:-autoaudiosink}"
 INDEXES="${INDEXES:-}"
+SOURCE_MODE="${SOURCE_MODE:-}"
 export DISPLAY="${DISPLAY:-:0}"
 
 if [[ -t 1 ]]; then
@@ -493,18 +495,19 @@ PY
 play_file() {
   local file="$1"
   local index="$2"
-  local base log info codec width height source_fps fps_summary samples avg_fps min_fps max_fps rc status
+  local base log info codec audio_codec width height source_fps fps_summary samples avg_fps min_fps max_fps rc status
 
   base="$(basename "${file}")"
   log="${LOG_DIR}/${index}_${base}.log"
   info="$(probe_video_info "${file}")"
   codec="$(printf '%s\n' "${info}" | awk -F= '$1=="codec_name" { print $2; exit }')"
+  audio_codec="$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "${file}" 2>/dev/null | head -n 1 || true)"
   width="$(printf '%s\n' "${info}" | awk -F= '$1=="width" { print $2; exit }')"
   height="$(printf '%s\n' "${info}" | awk -F= '$1=="height" { print $2; exit }')"
   source_fps="$(printf '%s\n' "${info}" | awk -F= '$1=="avg_frame_rate" { print $2; exit }')"
 
   echo "=== FPS test ${base} ==="
-  echo "Pre-check: codec=${codec:-unknown}, size=${width:-?}x${height:-?}, source_fps=${source_fps:-unknown}"
+  echo "Pre-check: codec=${codec:-unknown}, audio=${audio_codec:-none}, size=${width:-?}x${height:-?}, source_fps=${source_fps:-unknown}"
   echo "Duration: ${DURATION:-full}"
   echo "Log: ${log}"
 
@@ -545,7 +548,7 @@ play_file() {
 run_hwdecode_playback() {
   local file="$1"
   local log="$2"
-  local info codec format parser demux audio_codec sink decoder
+  local info codec format parser demux audio_codec sink decoder audio_sink
   local -a launch_prefix
 
   info="$(probe_video_info "${file}")"
@@ -556,6 +559,7 @@ run_hwdecode_playback() {
   demux="$(get_demux "${file}" "${format}")"
   sink="nv3dsink sync=true"
   decoder="nvv4l2decoder"
+  audio_sink="${AUDIO_SINK}"
   launch_prefix=()
   if [[ -n "${DURATION}" ]]; then
     launch_prefix=("${PLAYER_TIMEOUT}" --foreground "${DURATION}")
@@ -563,6 +567,11 @@ run_hwdecode_playback() {
 
   echo "Mode: hwdecode"
   echo "Pipeline target: ${demux} -> ${parser} -> ${decoder} -> nvvidconv -> ${sink}"
+  if [[ -n "${audio_codec}" ]] && audio_supported_for_demux "${demux}"; then
+    echo "Audio target: ${audio_codec} -> decodebin -> ${audio_sink}"
+  else
+    echo "Audio target: none"
+  fi
 
   if [[ -z "${parser}" || -z "${demux}" ]]; then
     echo "ERROR: unsupported codec/container for hwdecode mode: codec=${codec:-unknown} format=${format:-unknown}" | tee -a "${log}" >&2
@@ -592,8 +601,8 @@ run_hwdecode_playback() {
   fi
 
   if [[ -n "${audio_codec}" ]] && audio_supported_for_demux "${demux}"; then
-    printf 'Command: %q -e filesrc location=%q ! %s name=demux demux.video_0 ! queue ! %s ! %s ! nvvidconv ! %s demux.audio_0 ! queue ! decodebin ! audioconvert ! audioresample ! autoaudiosink\n' \
-      "${GST_LAUNCH}" "${file}" "${demux}" "${parser}" "${decoder}" "${sink}"
+    printf 'Command: %q -e filesrc location=%q ! %s name=demux demux.video_0 ! queue ! %s ! %s ! nvvidconv ! %s demux.audio_0 ! queue ! decodebin ! audioconvert ! audioresample ! %s\n' \
+      "${GST_LAUNCH}" "${file}" "${demux}" "${parser}" "${decoder}" "${sink}" "${audio_sink}"
     "${launch_prefix[@]}" "${GST_LAUNCH}" -e \
       filesrc location="${file}" ! \
       ${demux} name=demux \
@@ -601,7 +610,8 @@ run_hwdecode_playback() {
       ${parser} ! ${decoder} ! nvvidconv ! \
       ${sink} \
       demux.audio_0 ! queue ! \
-      decodebin ! audioconvert ! audioresample ! autoaudiosink >"${log}" 2>&1
+      decodebin ! audioconvert ! audioresample ! \
+      ${audio_sink} >"${log}" 2>&1
     return $?
   fi
 
@@ -644,11 +654,81 @@ find_all_video_files() {
   \) | sort
 }
 
+select_source_mode() {
+  local choice
+
+  if [[ -n "${SOURCE_MODE}" ]]; then
+    case "${SOURCE_MODE}" in
+      local|nas|streaming) return 0 ;;
+      *)
+        echo "ERROR: unsupported SOURCE_MODE=${SOURCE_MODE}. Use local or streaming." >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  if [[ ! -t 0 ]]; then
+    SOURCE_MODE="local"
+    echo "Non-interactive shell; defaulting source mode to local copy."
+    return 0
+  fi
+
+  echo "Playback source mode:"
+  echo "1) Copy selected NAS videos to local and play local files (recommended)"
+  echo "2) Direct NAS streaming from ${MEDIA_DIR}"
+  read -r -p "Select [1/2, default 1]: " choice
+
+  case "${choice}" in
+    2)
+      SOURCE_MODE="streaming"
+      ;;
+    *)
+      SOURCE_MODE="local"
+      ;;
+  esac
+}
+
+prepare_playback_files() {
+  local src dest src_size dest_size
+  local -a prepared=()
+
+  if [[ "${SOURCE_MODE}" == "nas" ]]; then
+    SOURCE_MODE="streaming"
+  fi
+
+  if [[ "${SOURCE_MODE}" == "streaming" ]]; then
+    FILES=("${NAS_FILES[@]}")
+    return 0
+  fi
+
+  mkdir -p "${LOCAL_MEDIA_DIR}"
+  echo "Copying selected videos to local directory: ${LOCAL_MEDIA_DIR}"
+
+  for src in "${NAS_FILES[@]}"; do
+    dest="${LOCAL_MEDIA_DIR}/$(basename "${src}")"
+    src_size="$(stat -c '%s' "${src}" 2>/dev/null || echo "")"
+    dest_size="$(stat -c '%s' "${dest}" 2>/dev/null || echo "")"
+
+    if [[ -s "${dest}" && -n "${src_size}" && "${src_size}" == "${dest_size}" ]]; then
+      echo "Local file exists; skipping copy: ${dest}"
+    else
+      echo "Copying: ${src}"
+      echo "     To: ${dest}"
+      cp -f "${src}" "${dest}"
+      sync "${dest}" || true
+    fi
+    prepared+=("${dest}")
+  done
+
+  FILES=("${prepared[@]}")
+}
+
 echo "5.7 FPS test"
 echo "Host: $(hostname)"
 echo "Date: $(date --iso-8601=seconds)"
 echo "Mode: ${MODE}"
 echo "Media directory: ${MEDIA_DIR}"
+echo "Local media directory: ${LOCAL_MEDIA_DIR}"
 echo "Log directory: ${LOG_DIR}"
 echo "Duration per file: ${DURATION}"
 setup_display
@@ -679,19 +759,27 @@ SUMMARY_TXT="${LOG_DIR}/summary.txt"
 echo "file,status,exit_code,samples,avg_fps,min_fps,max_fps,codec,width,height,source_fps,log" >"${SUMMARY_CSV}"
 echo "Player: $(command -v "${GST_LAUNCH}")"
 echo "Pipeline: parser -> nvv4l2decoder -> nvvidconv -> nv3dsink sync=true"
+echo "Audio sink: ${AUDIO_SINK} (used only when the source file has an audio track)"
 echo "Playback: full file, then automatically continue"
 echo
 
 if [[ -n "${INDEXES}" ]]; then
-  mapfile -t FILES < <(find_files_by_indexes | awk '!seen[$0]++')
+  mapfile -t NAS_FILES < <(find_files_by_indexes | awk '!seen[$0]++')
 else
-  mapfile -t FILES < <(find_all_video_files)
+  mapfile -t NAS_FILES < <(find_all_video_files)
 fi
 
-if [[ "${#FILES[@]}" -eq 0 ]]; then
+if [[ "${#NAS_FILES[@]}" -eq 0 ]]; then
   echo "ERROR: No video files found in ${MEDIA_DIR}" >&2
   exit 1
 fi
+
+select_source_mode
+prepare_playback_files
+
+echo "Source mode: ${SOURCE_MODE}"
+echo "Playback files: ${#FILES[@]}"
+echo
 
 for idx in "${!FILES[@]}"; do
   if ! play_file "${FILES[$idx]}" "$((idx + 1))"; then
@@ -704,6 +792,8 @@ done
   echo "Host: $(hostname)"
   echo "Date: $(date --iso-8601=seconds)"
   echo "Media directory: ${MEDIA_DIR}"
+  echo "Local media directory: ${LOCAL_MEDIA_DIR}"
+  echo "Source mode: ${SOURCE_MODE}"
   echo "Duration per file: ${DURATION}"
   echo "Video sink: nv3dsink sync=true"
   echo "Player: gst-launch-1.0 hardware decode"

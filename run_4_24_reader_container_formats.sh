@@ -2,9 +2,11 @@
 set -euo pipefail
 
 MEDIA_DIR="${MEDIA_DIR:-/mnt/nas_home/TEST FILE/Reader Container Formats}"
+LOCAL_MEDIA_DIR="${LOCAL_MEDIA_DIR:-${HOME}/4_24_reader_container_media}"
 LOG_DIR="${LOG_DIR:-/tmp/reader_container_4_24_logs}"
 PLAYER="${PLAYER:-nvgstplayer-1.0}"
 INDEXES="${INDEXES:-01 02 03 04 05 06 07 08 09 10}"
+SOURCE_MODE="${SOURCE_MODE:-}"
 DISPLAY="${DISPLAY:-:0}"
 
 if [[ -t 1 ]]; then
@@ -207,6 +209,72 @@ prompt_continue() {
       *) echo "Please answer y or n." ;;
     esac
   done
+}
+
+select_source_mode() {
+  local choice
+
+  if [[ -n "${SOURCE_MODE}" ]]; then
+    case "${SOURCE_MODE}" in
+      local|nas|streaming) return 0 ;;
+      *)
+        echo "ERROR: unsupported SOURCE_MODE=${SOURCE_MODE}. Use local or streaming." >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  if [[ ! -t 0 ]]; then
+    SOURCE_MODE="local"
+    echo "Non-interactive shell; defaulting source mode to local copy."
+    return 0
+  fi
+
+  echo "Playback source mode:"
+  echo "1) Copy selected NAS videos to local and play local files (recommended)"
+  echo "2) Direct NAS streaming from ${MEDIA_DIR}"
+  read -r -p "Select [1/2, default 1]: " choice
+
+  case "${choice}" in
+    2) SOURCE_MODE="streaming" ;;
+    *) SOURCE_MODE="local" ;;
+  esac
+}
+
+prepare_playback_files() {
+  local i src dest src_size dest_size
+  local -a prepared=()
+
+  if [[ "${SOURCE_MODE}" == "nas" ]]; then
+    SOURCE_MODE="streaming"
+  fi
+
+  if [[ "${SOURCE_MODE}" == "streaming" ]]; then
+    PLAYLIST_FILES=("${NAS_PLAYLIST_FILES[@]}")
+    return 0
+  fi
+
+  mkdir -p "${LOCAL_MEDIA_DIR}"
+  echo "Copying selected videos to local directory: ${LOCAL_MEDIA_DIR}"
+
+  for i in "${!NAS_PLAYLIST_FILES[@]}"; do
+    src="${NAS_PLAYLIST_FILES[$i]}"
+    dest="${LOCAL_MEDIA_DIR}/$(basename "${src}")"
+    src_size="$(stat -c '%s' "${src}" 2>/dev/null || echo "")"
+    dest_size="$(stat -c '%s' "${dest}" 2>/dev/null || echo "")"
+
+    if [[ -s "${dest}" && -n "${src_size}" && "${src_size}" == "${dest_size}" ]]; then
+      echo "Local file exists; skipping copy: ${dest}"
+    else
+      echo "Copying: ${src}"
+      echo "     To: ${dest}"
+      cp -f "${src}" "${dest}"
+      sync "${dest}" || true
+    fi
+    prepared+=("${dest}")
+  done
+
+  PLAYLIST_FILES=("${prepared[@]}")
 }
 
 prompt_play_unsupported() {
@@ -574,6 +642,7 @@ echo "4.24 Reader Container Formats test"
 echo "Host: $(hostname)"
 echo "Date: $(date --iso-8601=seconds)"
 echo "Media directory: ${MEDIA_DIR}"
+echo "Local media directory: ${LOCAL_MEDIA_DIR}"
 echo "Log directory: ${LOG_DIR}"
 setup_display
 echo "DISPLAY: ${DISPLAY}"
@@ -595,6 +664,7 @@ mkdir -p "${LOG_DIR}"
 echo "Player: $(command -v "${PLAYER}")"
 echo
 
+declare -a NAS_PLAYLIST_FILES=()
 declare -a PLAYLIST_FILES=()
 declare -a PLAYLIST_INDEXES=()
 for index in ${INDEXES}; do
@@ -616,9 +686,16 @@ for index in ${INDEXES}; do
     exit 1
   fi
 
-  PLAYLIST_FILES+=("${matches[0]}")
+  NAS_PLAYLIST_FILES+=("${matches[0]}")
   PLAYLIST_INDEXES+=("${index}")
 done
+
+select_source_mode
+prepare_playback_files
+
+echo "Source mode: ${SOURCE_MODE}"
+echo "Playback files: ${#PLAYLIST_FILES[@]}"
+echo
 
 current_index=0
 while [[ "${current_index}" -lt "${#PLAYLIST_FILES[@]}" ]]; do

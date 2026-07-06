@@ -2,9 +2,11 @@
 set -u
 
 MEDIA_DIR="${MEDIA_DIR:-/mnt/nas_home/TEST FILE/video bit rate}"
+LOCAL_MEDIA_DIR="${LOCAL_MEDIA_DIR:-${HOME}/5_8_video_bit_rate_media}"
 LOG_DIR="${LOG_DIR:-/tmp/video_bit_rate_5_8_logs}"
 PLAYER="${PLAYER:-nvgstplayer-1.0}"
 INDEXES="${INDEXES:-}"
+SOURCE_MODE="${SOURCE_MODE:-}"
 export DISPLAY="${DISPLAY:-:0}"
 
 if [[ -t 1 ]]; then
@@ -122,10 +124,76 @@ find_files() {
   fi
 }
 
+select_source_mode() {
+  local choice
+
+  if [[ -n "${SOURCE_MODE}" ]]; then
+    case "${SOURCE_MODE}" in
+      local|nas|streaming) return 0 ;;
+      *)
+        echo "ERROR: unsupported SOURCE_MODE=${SOURCE_MODE}. Use local or streaming." >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  if [[ ! -t 0 ]]; then
+    SOURCE_MODE="local"
+    echo "Non-interactive shell; defaulting source mode to local copy."
+    return 0
+  fi
+
+  echo "Playback source mode:"
+  echo "1) Copy selected NAS videos to local and play local files (recommended)"
+  echo "2) Direct NAS streaming from ${MEDIA_DIR}"
+  read -r -p "Select [1/2, default 1]: " choice
+
+  case "${choice}" in
+    2) SOURCE_MODE="streaming" ;;
+    *) SOURCE_MODE="local" ;;
+  esac
+}
+
+prepare_playback_files() {
+  local src dest src_size dest_size
+  local -a prepared=()
+
+  if [[ "${SOURCE_MODE}" == "nas" ]]; then
+    SOURCE_MODE="streaming"
+  fi
+
+  if [[ "${SOURCE_MODE}" == "streaming" ]]; then
+    FILES=("${NAS_FILES[@]}")
+    return 0
+  fi
+
+  mkdir -p "${LOCAL_MEDIA_DIR}"
+  echo "Copying selected videos to local directory: ${LOCAL_MEDIA_DIR}"
+
+  for src in "${NAS_FILES[@]}"; do
+    dest="${LOCAL_MEDIA_DIR}/$(basename "${src}")"
+    src_size="$(stat -c '%s' "${src}" 2>/dev/null || echo "")"
+    dest_size="$(stat -c '%s' "${dest}" 2>/dev/null || echo "")"
+
+    if [[ -s "${dest}" && -n "${src_size}" && "${src_size}" == "${dest_size}" ]]; then
+      echo "Local file exists; skipping copy: ${dest}"
+    else
+      echo "Copying: ${src}"
+      echo "     To: ${dest}"
+      cp -f "${src}" "${dest}"
+      sync "${dest}" || true
+    fi
+    prepared+=("${dest}")
+  done
+
+  FILES=("${prepared[@]}")
+}
+
 echo "5.8 Video Bit Rate test"
 echo "Host: $(hostname)"
 echo "Date: $(date --iso-8601=seconds)"
 echo "Media directory: ${MEDIA_DIR}"
+echo "Local media directory: ${LOCAL_MEDIA_DIR}"
 echo "Player: ${PLAYER} -i"
 echo "Playback: full file, then automatically continue"
 setup_display
@@ -147,11 +215,18 @@ mkdir -p "${LOG_DIR}"
 SUMMARY="${LOG_DIR}/summary.csv"
 printf 'index,file,codec,resolution,source_fps,bitrate,status,exit_code,log\n' >"${SUMMARY}"
 
-mapfile -t FILES < <(find_files)
-if [[ "${#FILES[@]}" -eq 0 ]]; then
+mapfile -t NAS_FILES < <(find_files)
+if [[ "${#NAS_FILES[@]}" -eq 0 ]]; then
   echo "ERROR: No video files found in ${MEDIA_DIR}" >&2
   exit 1
 fi
+
+select_source_mode
+prepare_playback_files
+
+echo "Source mode: ${SOURCE_MODE}"
+echo "Playback files: ${#FILES[@]}"
+echo
 
 pass=0
 fail=0
@@ -197,6 +272,7 @@ done
 
 echo "5.8 Video Bit Rate summary"
 echo "Files: ${#FILES[@]}"
+echo "Source mode: ${SOURCE_MODE}"
 echo "PASS: ${pass}"
 echo "FAIL: ${fail}"
 echo "CSV: ${SUMMARY}"

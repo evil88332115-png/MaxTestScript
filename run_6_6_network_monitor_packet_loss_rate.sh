@@ -4,6 +4,9 @@ set -euo pipefail
 echo "6-6 Network Monitor Packet Loss Rate"
 echo "Host: $(hostname)"
 echo "Date: $(date --iso-8601=seconds)"
+LOG_DIR="${LOG_DIR:-${HOME}/6-6_network_monitor_$(date +%Y%m%d_%H%M%S)}"
+mkdir -p "${LOG_DIR}"
+echo "Log directory: ${LOG_DIR}"
 echo
 
 install_requirements() {
@@ -33,7 +36,8 @@ PY
 
 install_requirements
 
-python3 - <<'PY'
+LOG_DIR="${LOG_DIR}" python3 - <<'PY'
+import os
 import subprocess
 import sys
 import time
@@ -45,6 +49,9 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+LOG_DIR = Path(os.environ.get("LOG_DIR", ".")).expanduser()
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def ensure_mtr():
@@ -97,9 +104,12 @@ def parse_mtr_output(output, timestamp):
     return pd.DataFrame(data)
 
 
+def safe_name(value):
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
+
+
 def save_csv(df, target_ip):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"mtr_report_{target_ip}_{timestamp}.csv"
+    filename = LOG_DIR / f"mtr_report_{safe_name(target_ip)}.csv"
     df.to_csv(filename, index=False)
     print(f"CSV saved: {filename}")
     return filename
@@ -125,7 +135,7 @@ def plot_graph(df, target_ip):
     plt.ylabel("Value")
     plt.legend()
     plt.tight_layout()
-    filename = f"mtr_graph_{target_ip}.png"
+    filename = LOG_DIR / f"mtr_graph_{target_ip}.png"
     plt.savefig(filename)
     print(f"Graph saved: {filename}")
     plt.close()
@@ -154,7 +164,7 @@ def plot_summary_graph(all_data, target_ip):
     plt.ylabel("Avg Latency (ms)")
     plt.legend()
     plt.tight_layout()
-    filename = f"summary_latency_{target_ip}.png"
+    filename = LOG_DIR / f"summary_latency_{target_ip}.png"
     plt.savefig(filename)
     print(f"Summary latency graph saved: {filename}")
     plt.close()
@@ -175,34 +185,37 @@ def plot_summary_graph(all_data, target_ip):
     plt.ylabel("Loss (%)")
     plt.legend()
     plt.tight_layout()
-    filename = f"summary_loss_{target_ip}.png"
+    filename = LOG_DIR / f"summary_loss_{target_ip}.png"
     plt.savefig(filename)
     print(f"Summary loss graph saved: {filename}")
     plt.close()
 
 
-def log_to_file(df, target_ip):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open("network_loss.log", "a", encoding="utf-8") as fh:
-        for _, row in df.iterrows():
-            log_line = (
-                f"{timestamp} {target_ip} {row['Host']} "
-                f"Loss={row['Loss (%)']}% Latency={row['Avg Latency (ms)']}ms\n"
-            )
-            fh.write(log_line)
-    print("Log updated: network_loss.log")
+def prompt_input(prompt, env_name=None):
+    if env_name:
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            print(f"{prompt}{value}")
+            return value
+
+    try:
+        with open("/dev/tty", "r", encoding="utf-8", errors="replace") as tty:
+            print(prompt, end="", flush=True)
+            return tty.readline().strip()
+    except OSError:
+        return input(prompt).strip()
 
 
 def main():
     ensure_mtr()
 
-    target_ip = input("Enter target IP or domain: ").strip()
+    target_ip = prompt_input("Enter target IP or domain: ", "TARGET")
     if not target_ip:
         print("Invalid input. Target IP/domain is required.")
         return
 
     try:
-        hours = float(input("Enter test duration (in hours): ").strip())
+        hours = float(prompt_input("Enter test duration (in hours): ", "DURATION_HOURS"))
         if hours <= 0:
             raise ValueError
     except ValueError:
@@ -213,24 +226,35 @@ def main():
     interval = 60
     count = 50
     all_data = pd.DataFrame()
+    target_name = safe_name(target_ip)
+    raw_filename = LOG_DIR / f"mtr_raw_{target_name}.txt"
 
     print(f"Starting monitoring for {hours} hour(s)...")
     print(f"MTR command: mtr -rw -n -c {count} {target_ip}")
+    print("Output files:")
+    print(f"  Raw MTR: {raw_filename}")
+    print(f"  CSV: {LOG_DIR / f'mtr_report_{target_name}.csv'}")
+    print(f"  Graphs: {LOG_DIR / f'mtr_graph_{target_ip}.png'}, "
+          f"{LOG_DIR / f'summary_latency_{target_ip}.png'}, "
+          f"{LOG_DIR / f'summary_loss_{target_ip}.png'}")
 
     while datetime.now() < end_time:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\nRunning test at {timestamp}")
         output = run_mtr(target_ip, count=count)
 
-        raw_filename = f"mtr_raw_{target_ip}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        Path(raw_filename).write_text(output, encoding="utf-8", errors="replace")
-        print(f"Raw MTR saved: {raw_filename}")
+        with raw_filename.open("a", encoding="utf-8", errors="replace") as fh:
+            fh.write(f"\n===== {timestamp} =====\n")
+            fh.write(output)
+            if not output.endswith("\n"):
+                fh.write("\n")
+        print(f"Raw MTR updated: {raw_filename}")
 
         df = parse_mtr_output(output, timestamp)
         all_data = pd.concat([all_data, df], ignore_index=True)
-        save_csv(df, target_ip)
+        save_csv(all_data, target_ip)
         plot_graph(df, target_ip)
-        log_to_file(df, target_ip)
+        plot_summary_graph(all_data, target_ip)
 
         if datetime.now() + timedelta(seconds=interval) < end_time:
             print(f"Waiting {interval // 60} minutes before next test...")
@@ -240,6 +264,7 @@ def main():
 
     plot_summary_graph(all_data, target_ip)
     print("Monitoring complete.")
+    print(f"Artifacts: {LOG_DIR}")
 
 
 if __name__ == "__main__":

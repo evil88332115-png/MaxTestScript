@@ -2,6 +2,8 @@
 set -euo pipefail
 
 AUDIO_DIR="${AUDIO_DIR:-/mnt/nas_home/TEST FILE/Audio Decode}"
+LOCAL_AUDIO_DIR="${LOCAL_AUDIO_DIR:-${HOME}/4_21_audio_decode_media}"
+SOURCE_MODE="${SOURCE_MODE:-}"
 
 format_seconds() {
   local seconds="$1"
@@ -54,6 +56,71 @@ find_player() {
 
   echo "ERROR: No supported audio player found. Install ffmpeg, gstreamer1.0-tools, or vlc." >&2
   exit 1
+}
+
+select_source_mode() {
+  local choice
+
+  if [[ -n "${SOURCE_MODE}" ]]; then
+    case "${SOURCE_MODE}" in
+      local|nas|streaming) return 0 ;;
+      *)
+        echo "ERROR: unsupported SOURCE_MODE=${SOURCE_MODE}. Use local or streaming." >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  if [[ ! -t 0 ]]; then
+    SOURCE_MODE="local"
+    echo "Non-interactive shell; defaulting source mode to local copy."
+    return 0
+  fi
+
+  echo "Playback source mode:"
+  echo "1) Copy selected NAS videos to local and play local files (recommended)"
+  echo "2) Direct NAS streaming from ${AUDIO_DIR}"
+  read -r -p "Select [1/2, default 1]: " choice
+
+  case "${choice}" in
+    2) SOURCE_MODE="streaming" ;;
+    *) SOURCE_MODE="local" ;;
+  esac
+}
+
+prepare_playback_files() {
+  local src dest src_size dest_size
+  local -a prepared=()
+
+  if [[ "${SOURCE_MODE}" == "nas" ]]; then
+    SOURCE_MODE="streaming"
+  fi
+
+  if [[ "${SOURCE_MODE}" == "streaming" ]]; then
+    PLAYLIST=("${NAS_PLAYLIST[@]}")
+    return 0
+  fi
+
+  mkdir -p "${LOCAL_AUDIO_DIR}"
+  echo "Copying selected files to local directory: ${LOCAL_AUDIO_DIR}"
+
+  for src in "${NAS_PLAYLIST[@]}"; do
+    dest="${LOCAL_AUDIO_DIR}/$(basename "${src}")"
+    src_size="$(stat -c '%s' "${src}" 2>/dev/null || echo "")"
+    dest_size="$(stat -c '%s' "${dest}" 2>/dev/null || echo "")"
+
+    if [[ -s "${dest}" && -n "${src_size}" && "${src_size}" == "${dest_size}" ]]; then
+      echo "Local file exists; skipping copy: ${dest}"
+    else
+      echo "Copying: ${src}"
+      echo "     To: ${dest}"
+      cp -f "${src}" "${dest}"
+      sync "${dest}" || true
+    fi
+    prepared+=("${dest}")
+  done
+
+  PLAYLIST=("${prepared[@]}")
 }
 
 play_file() {
@@ -161,6 +228,7 @@ echo "4.21 Audio Decode test"
 echo "Host: $(hostname)"
 echo "Date: $(date --iso-8601=seconds)"
 echo "Audio directory: ${AUDIO_DIR}"
+echo "Local audio directory: ${LOCAL_AUDIO_DIR}"
 echo
 
 if [[ ! -d "${AUDIO_DIR}" ]]; then
@@ -173,6 +241,7 @@ find_player
 echo "Player: ${PLAYER}"
 echo
 
+declare -a NAS_PLAYLIST=()
 declare -a PLAYLIST=()
 for index in 01 02 03 04 05 06 07 08; do
   mapfile -t matches < <(find "${AUDIO_DIR}" -maxdepth 1 -type f -name "TestFile_${index}_*" | sort)
@@ -187,8 +256,15 @@ for index in 01 02 03 04 05 06 07 08; do
     exit 1
   fi
 
-  PLAYLIST+=("${matches[0]}")
+  NAS_PLAYLIST+=("${matches[0]}")
 done
+
+select_source_mode
+prepare_playback_files
+
+echo "Source mode: ${SOURCE_MODE}"
+echo "Playback files: ${#PLAYLIST[@]}"
+echo
 
 current_index=0
 while [[ "${current_index}" -lt "${#PLAYLIST[@]}" ]]; do

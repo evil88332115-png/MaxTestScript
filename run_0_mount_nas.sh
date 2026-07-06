@@ -69,6 +69,20 @@ REQUIRED_COMMANDS=(
   wput
 )
 
+run_sudo() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+    return $?
+  fi
+
+  if [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    printf '%s\n' "${SUDO_PASSWORD}" | sudo -S -p '' "$@"
+    return $?
+  fi
+
+  sudo "$@"
+}
+
 JETSON_COMMANDS=(
   nvgstplayer-1.0
   tegrastats
@@ -109,22 +123,14 @@ install_tools() {
     return 0
   fi
 
-  local sudo_cmd=()
-  if [[ "$(id -u)" -ne 0 ]]; then
-    if ! command -v sudo >/dev/null 2>&1; then
-      echo "ERROR: sudo not found. Run this script as root." >&2
-      exit 1
-    fi
-    sudo_cmd=(sudo)
+  if [[ "$(id -u)" -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
+    echo "ERROR: sudo not found. Run this script as root." >&2
+    exit 1
   fi
 
   echo "Installing missing test requirements..."
-  "${sudo_cmd[@]}" apt-get update
-  if [[ "${#sudo_cmd[@]}" -gt 0 ]]; then
-    "${sudo_cmd[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
-  else
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
-  fi
+  run_sudo apt-get update
+  run_sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
 }
 
 verify_tools() {
@@ -182,7 +188,7 @@ mount_nas() {
   echo "SMB version: ${SMB_VERSION}"
   echo
 
-  sudo mkdir -p "${MOUNT_POINT}"
+  run_sudo mkdir -p "${MOUNT_POINT}"
 
   if mountpoint -q "${MOUNT_POINT}"; then
     echo "${MOUNT_POINT} is already mounted."
@@ -190,7 +196,7 @@ mount_nas() {
     return 0
   fi
 
-  sudo mount -t cifs "${source}" "${MOUNT_POINT}" \
+  run_sudo mount -t cifs "${source}" "${MOUNT_POINT}" \
     -o "username=${NAS_USER},password=${NAS_PASS},vers=${SMB_VERSION},uid=$(id -u),gid=$(id -g),file_mode=0664,dir_mode=0775${EXTRA_OPTIONS:+,${EXTRA_OPTIONS}}"
 }
 
