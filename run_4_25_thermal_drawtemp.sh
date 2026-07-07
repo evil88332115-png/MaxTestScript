@@ -495,7 +495,7 @@ if [[ ! -f "${DRAW_TEMP_SCRIPT}" ]]; then
 fi
 
 echo "Drawing CPU+GPU temperature curve with drawtemp..."
-python3 "${DRAW_TEMP_SCRIPT}" \
+env PYTHONNOUSERSITE=1 python3 "${DRAW_TEMP_SCRIPT}" \
   --file "${TEGRATS_LOG}" \
   --mode "${DRAW_TEMP_MODE}" \
   --avg-min "${DRAW_TEMP_AVG_MIN}" \

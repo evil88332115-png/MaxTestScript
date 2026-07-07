@@ -159,13 +159,34 @@ draw_temperature_curve() {
 }
 
 ensure_python_onnx() {
+  local answer
+
   if python3 -c "import onnx" >/dev/null 2>&1; then
     echo "Python onnx module found."
     return 0
   fi
 
+  if ! python3 -m pip --version >/dev/null 2>&1; then
+    warn "WARNING: python3 pip module not found."
+    echo "Suggested install command:"
+    echo "  sudo apt-get install -y python3-pip"
+    read -r -p "Install python3-pip now? [y/N] " answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      sudo apt-get update
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip
+    fi
+  fi
+
+  if ! python3 -m pip --version >/dev/null 2>&1; then
+    fail "RESULT,TENSORRT,ONNX_MODULE,FAIL,pip-not-found"
+    return 1
+  fi
+
   echo "Python onnx module not found. Installing with pip --user..."
-  python3 -m pip install --user onnx
+  if ! python3 -m pip install --user onnx; then
+    fail "RESULT,TENSORRT,ONNX_MODULE,FAIL,pip-install-failed"
+    return 1
+  fi
 
   if python3 -c "import onnx" >/dev/null 2>&1; then
     pass "RESULT,TENSORRT,ONNX_MODULE,PASS"
