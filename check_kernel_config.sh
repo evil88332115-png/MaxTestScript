@@ -1,10 +1,42 @@
 #!/bin/bash
 # Check if required kernel configs are enabled on the target device.
-# Usage: ./check_kernel_config.sh [ip] [user] [password]
+# Usage:
+#   ./check_kernel_config.sh
+#   ./check_kernel_config.sh [ip] [user] [password]
 
-TARGET_IP="${1:-192.168.23.131}"
-TARGET_USER="${2:-linaro}"
-TARGET_PASS="${3:-linaro}"
+DEFAULT_TARGET_IP="192.168.23.101"
+DEFAULT_TARGET_USER="p"
+DEFAULT_TARGET_PASS="p"
+
+prompt_value() {
+	local label="$1"
+	local default_value="$2"
+	local value
+
+	printf "%s:[%s] " "${label}" "${default_value}" >&2
+	read -r value
+	echo "${value:-$default_value}"
+}
+
+prompt_password() {
+	local default_value="$1"
+	local value
+
+	printf "password:[%s] " "${default_value}" >&2
+	read -r -s value
+	printf "\n" >&2
+	echo "${value:-$default_value}"
+}
+
+if [ "$#" -gt 0 ]; then
+	TARGET_IP="${1:-$DEFAULT_TARGET_IP}"
+	TARGET_USER="${2:-$DEFAULT_TARGET_USER}"
+	TARGET_PASS="${3:-$DEFAULT_TARGET_PASS}"
+else
+	TARGET_IP=$(prompt_value "ip" "${DEFAULT_TARGET_IP}")
+	TARGET_USER=$(prompt_value "username" "${DEFAULT_TARGET_USER}")
+	TARGET_PASS=$(prompt_password "${DEFAULT_TARGET_PASS}")
+fi
 
 CONFIGS=(
 	# PPP core
