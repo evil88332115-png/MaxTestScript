@@ -2,7 +2,8 @@
 # Check if required kernel configs are enabled on the target device.
 # Usage:
 #   ./check_kernel_config.sh
-#   ./check_kernel_config.sh [ip] [user] [password]
+#   ./check_kernel_config.sh local
+#   ./check_kernel_config.sh ssh [ip] [user] [password]
 
 TARGET_IP_HINT="192.168.xx.xx"
 DEFAULT_TARGET_USER="p"
@@ -44,18 +45,65 @@ prompt_password() {
 	echo "${value:-$default_value}"
 }
 
-if [ "$#" -gt 0 ]; then
-	TARGET_IP="$1"
-	if [ -z "${TARGET_IP}" ]; then
-		echo "ERROR: ip is required." >&2
-		exit 1
-	fi
-	TARGET_USER="${2:-$DEFAULT_TARGET_USER}"
-	TARGET_PASS="${3:-$DEFAULT_TARGET_PASS}"
-else
+prompt_mode() {
+	local mode
+
+	while true; do
+		echo "Select check target:" >&2
+		echo "1. local" >&2
+		echo "2. ssh" >&2
+		printf "choice:[1] " >&2
+		read -r mode
+
+		case "${mode:-1}" in
+			1|local|LOCAL)
+				echo "local"
+				return 0
+				;;
+			2|ssh|SSH)
+				echo "ssh"
+				return 0
+				;;
+			*)
+				echo "ERROR: choose 1 or 2." >&2
+				;;
+		esac
+	done
+}
+
+MODE=""
+TARGET_IP=""
+TARGET_USER=""
+TARGET_PASS=""
+
+case "${1:-}" in
+	local|LOCAL)
+		MODE="local"
+		;;
+	ssh|SSH)
+		MODE="ssh"
+		TARGET_IP="${2:-}"
+		TARGET_USER="${3:-$DEFAULT_TARGET_USER}"
+		TARGET_PASS="${4:-$DEFAULT_TARGET_PASS}"
+		;;
+	"")
+		MODE=$(prompt_mode)
+		if [ "${MODE}" = "ssh" ]; then
+			TARGET_IP=$(prompt_required_value "ip" "${TARGET_IP_HINT}")
+			TARGET_USER=$(prompt_value "username" "${DEFAULT_TARGET_USER}")
+			TARGET_PASS=$(prompt_password "${DEFAULT_TARGET_PASS}")
+		fi
+		;;
+	*)
+		MODE="ssh"
+		TARGET_IP="$1"
+		TARGET_USER="${2:-$DEFAULT_TARGET_USER}"
+		TARGET_PASS="${3:-$DEFAULT_TARGET_PASS}"
+		;;
+esac
+
+if [ "${MODE}" = "ssh" ] && [ -z "${TARGET_IP}" ]; then
 	TARGET_IP=$(prompt_required_value "ip" "${TARGET_IP_HINT}")
-	TARGET_USER=$(prompt_value "username" "${DEFAULT_TARGET_USER}")
-	TARGET_PASS=$(prompt_password "${DEFAULT_TARGET_PASS}")
 fi
 
 CONFIGS=(
@@ -89,7 +137,11 @@ NC='\033[0m'
 
 echo "=============================================="
 echo " Kernel Config Check"
-echo " Target: ${TARGET_USER}@${TARGET_IP}"
+if [ "${MODE}" = "local" ]; then
+	echo " Target: local ($(hostname 2>/dev/null || echo unknown))"
+else
+	echo " Target: ${TARGET_USER}@${TARGET_IP}"
+fi
 echo "=============================================="
 
 read_kernel_config() {
@@ -98,12 +150,7 @@ read_kernel_config() {
 		echo 'CONFIG_NOT_FOUND=unavailable'
 }
 
-is_local_target() {
-	[ "${TARGET_IP}" = "127.0.0.1" ] || [ "${TARGET_IP}" = "localhost" ] && return 0
-	hostname -I 2>/dev/null | tr ' ' '\n' | grep -qx "${TARGET_IP}"
-}
-
-if is_local_target; then
+if [ "${MODE}" = "local" ]; then
 	RAW=$(read_kernel_config 2>&1)
 else
 	if ! command -v sshpass >/dev/null 2>&1; then
