@@ -4,7 +4,7 @@
 #   ./check_kernel_config.sh
 #   ./check_kernel_config.sh [ip] [user] [password]
 
-DEFAULT_TARGET_IP="192.168.23.101"
+TARGET_IP_HINT="192.168.xx.xx"
 DEFAULT_TARGET_USER="p"
 DEFAULT_TARGET_PASS="p"
 
@@ -18,6 +18,22 @@ prompt_value() {
 	echo "${value:-$default_value}"
 }
 
+prompt_required_value() {
+	local label="$1"
+	local hint="$2"
+	local value
+
+	while true; do
+		printf "%s:[%s] " "${label}" "${hint}" >&2
+		read -r value
+		if [ -n "${value}" ]; then
+			echo "${value}"
+			return 0
+		fi
+		echo "ERROR: ${label} is required." >&2
+	done
+}
+
 prompt_password() {
 	local default_value="$1"
 	local value
@@ -29,11 +45,15 @@ prompt_password() {
 }
 
 if [ "$#" -gt 0 ]; then
-	TARGET_IP="${1:-$DEFAULT_TARGET_IP}"
+	TARGET_IP="$1"
+	if [ -z "${TARGET_IP}" ]; then
+		echo "ERROR: ip is required." >&2
+		exit 1
+	fi
 	TARGET_USER="${2:-$DEFAULT_TARGET_USER}"
 	TARGET_PASS="${3:-$DEFAULT_TARGET_PASS}"
 else
-	TARGET_IP=$(prompt_value "ip" "${DEFAULT_TARGET_IP}")
+	TARGET_IP=$(prompt_required_value "ip" "${TARGET_IP_HINT}")
 	TARGET_USER=$(prompt_value "username" "${DEFAULT_TARGET_USER}")
 	TARGET_PASS=$(prompt_password "${DEFAULT_TARGET_PASS}")
 fi
