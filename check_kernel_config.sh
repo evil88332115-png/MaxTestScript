@@ -40,10 +40,30 @@ echo " Kernel Config Check"
 echo " Target: ${TARGET_USER}@${TARGET_IP}"
 echo "=============================================="
 
-# Fetch /proc/config.gz from the device
-RAW=$(sshpass -p "${TARGET_PASS}" ssh -o StrictHostKeyChecking=no \
-	"${TARGET_USER}@${TARGET_IP}" \
-	"zcat /proc/config.gz 2>/dev/null || cat /boot/config-\$(uname -r) 2>/dev/null || echo 'CONFIG_NOT_FOUND=unavailable'" 2>&1)
+read_kernel_config() {
+	zcat /proc/config.gz 2>/dev/null ||
+		cat "/boot/config-$(uname -r)" 2>/dev/null ||
+		echo 'CONFIG_NOT_FOUND=unavailable'
+}
+
+is_local_target() {
+	[ "${TARGET_IP}" = "127.0.0.1" ] || [ "${TARGET_IP}" = "localhost" ] && return 0
+	hostname -I 2>/dev/null | tr ' ' '\n' | grep -qx "${TARGET_IP}"
+}
+
+if is_local_target; then
+	RAW=$(read_kernel_config 2>&1)
+else
+	if ! command -v sshpass >/dev/null 2>&1; then
+		echo -e "${RED}ERROR: sshpass is required for remote checks.${NC}"
+		echo "       Install sshpass or run this script directly on ${TARGET_IP}."
+		exit 1
+	fi
+
+	RAW=$(sshpass -p "${TARGET_PASS}" ssh -o StrictHostKeyChecking=no \
+		"${TARGET_USER}@${TARGET_IP}" \
+		"zcat /proc/config.gz 2>/dev/null || cat /boot/config-\$(uname -r) 2>/dev/null || echo 'CONFIG_NOT_FOUND=unavailable'" 2>&1)
+fi
 
 if echo "${RAW}" | grep -q "CONFIG_NOT_FOUND=unavailable"; then
 	echo -e "${RED}ERROR: Cannot read kernel config from device.${NC}"
