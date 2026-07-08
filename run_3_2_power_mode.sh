@@ -39,6 +39,34 @@ die() {
   exit 1
 }
 
+run_sudo() {
+  if [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    printf '%s\n' "${SUDO_PASSWORD}" | sudo -S -p '' "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+run_nvpmodel_decline_reboot() {
+  local mode_id="$1"
+
+  if [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    printf '%s\n\n' "${SUDO_PASSWORD}" | sudo -S -p '' nvpmodel -m "${mode_id}"
+  else
+    printf '\n' | sudo nvpmodel -m "${mode_id}"
+  fi
+}
+
+run_nvpmodel_confirm_reboot() {
+  local mode_id="$1"
+
+  if [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    printf '%s\nYES\n' "${SUDO_PASSWORD}" | sudo -S -p '' nvpmodel -m "${mode_id}"
+  else
+    printf 'YES\n' | sudo nvpmodel -m "${mode_id}"
+  fi
+}
+
 ensure_writable_dir() {
   local path="$1"
   local owner
@@ -50,7 +78,7 @@ ensure_writable_dir() {
   owner="$(id -u):$(id -g)"
   echo "Directory is not writable by current user: ${path}"
   echo "Trying to fix ownership: sudo chown -R ${owner} ${path}"
-  sudo chown -R "${owner}" "${path}"
+  run_sudo chown -R "${owner}" "${path}"
 
   [[ -w "${path}" ]] || die "Directory is still not writable: ${path}"
 }
@@ -70,6 +98,29 @@ get_current_mode_id() {
 
 get_current_mode_name() {
   nvpmodel -q 2>/dev/null | awk -F': ' '/NV Power Mode:/ {print $2; exit}'
+}
+
+ensure_sudo_auth() {
+  if [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    run_sudo -v
+    return
+  fi
+
+  if sudo -n true 2>/dev/null; then
+    return 0
+  fi
+
+  echo "sudo authentication is required to read jetson_clocks."
+  sudo -v
+}
+
+print_freq_info() {
+  if [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    run_sudo jetson_clocks --show 2>&1
+  else
+    sudo -n jetson_clocks --show 2>&1
+  fi |
+    awk '/^cpu/&&/Online=1/||/^GPU|^EMC/{for(i=1;i<=NF;i++)if($i~/^MaxFreq=/)print $1,$i}'
 }
 
 read_model() {
@@ -174,6 +225,8 @@ append_current_mode_record() {
   local stage="$3"
   local current_id current_name
 
+  ensure_sudo_auth || return 1
+
   current_id="$(get_current_mode_id || true)"
   current_name="$(get_current_mode_name || true)"
 
@@ -184,7 +237,7 @@ append_current_mode_record() {
     echo "nvpmodel -q"
     nvpmodel -q 2>&1 || true
     echo
-    sudo jetson_clocks --show 2>&1 | awk '/^cpu/&&/Online=1/||/^GPU|^EMC/{for(i=1;i<=NF;i++)if($i~/^MaxFreq=/)print $1,$i}'
+    print_freq_info
   } >> "${RESULT_FILE}"
 
   if [[ "${current_id}" == "${requested_id}" ]]; then
@@ -223,58 +276,59 @@ start_transcript_log() {
   echo "===== 3-2 transcript started: $(date --iso-8601=seconds) ====="
   echo "Transcript log: ${TRANSCRIPT_FILE}"
   if [[ "${AUTO_RESUME}" == "1" ]]; then
-    echo "Resume source: terminal auto-resume after reboot"
+    echo "Resume source: auto-resume after reboot"
   else
     echo "Resume source: manual run before reboot"
   fi
 }
 
 install_autoresume_service() {
-  local workdir home_dir terminal_cmd autostart_dir
+  local workdir home_dir user_name service_path service_tmp
 
   workdir="$(pwd)"
   home_dir="${HOME}"
-  autostart_dir="${home_dir}/.config/autostart"
-  terminal_cmd="gnome-terminal -- bash -lc"
+  user_name="$(id -un)"
+  service_path="/etc/systemd/system/${AUTORUN_SERVICE}"
+  service_tmp="$(mktemp)"
 
-  mkdir -p "${autostart_dir}" "$(dirname "${AUTORUN_TERMINAL_SCRIPT}")"
-  sudo systemctl disable "${AUTORUN_SERVICE}" >/dev/null 2>&1 || true
-  sudo rm -f "/etc/systemd/system/${AUTORUN_SERVICE}" 2>/dev/null || true
-  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+  rm -f "${AUTORUN_DESKTOP}" "${AUTORUN_TERMINAL_SCRIPT}" 2>/dev/null || true
+  run_sudo systemctl disable "${AUTORUN_SERVICE}" >/dev/null 2>&1 || true
+  run_sudo rm -f "${service_path}" 2>/dev/null || true
+  run_sudo systemctl daemon-reload >/dev/null 2>&1 || true
 
-  echo "Enable terminal auto-resume after reboot: ${AUTORUN_DESKTOP}"
-  cat > "${AUTORUN_TERMINAL_SCRIPT}" <<EOF
-#!/usr/bin/env bash
-cd '${workdir}' || exit 1
-export AUTO_RESUME=1
-./'${SCRIPT_NAME}'
-rc=\$?
-echo
-echo "3-2 Power Mode resume finished. Exit code: \${rc}"
-echo "Press Enter to close this terminal."
-read -r _
-exit "\${rc}"
+  echo "Enable headless auto-resume after reboot: ${service_path}"
+  cat > "${service_tmp}" <<EOF
+[Unit]
+Description=Resume 3-2 Power Mode Test after reboot
+After=multi-user.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=HOME=${home_dir}
+Environment=USER=${user_name}
+WorkingDirectory=${workdir}
+ExecStart=/bin/bash -lc 'export AUTO_RESUME=1 HOME=${home_dir} USER=${user_name}; cd "${workdir}" && ./${SCRIPT_NAME}'
+StandardOutput=append:${LOG_DIR}/3-2_power_mode_systemd_resume.log
+StandardError=append:${LOG_DIR}/3-2_power_mode_systemd_resume.log
+
+[Install]
+WantedBy=multi-user.target
 EOF
-  chmod +x "${AUTORUN_TERMINAL_SCRIPT}"
 
-  cat > "${AUTORUN_DESKTOP}" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Resume 3-2 Power Mode Test
-Comment=Open terminal and resume 3-2 power mode test after reboot
-Exec=${terminal_cmd} '${AUTORUN_TERMINAL_SCRIPT}'
-Terminal=false
-X-GNOME-Autostart-enabled=true
-EOF
+  run_sudo cp "${service_tmp}" "${service_path}"
+  rm -f "${service_tmp}"
+  run_sudo systemctl daemon-reload
+  run_sudo systemctl enable "${AUTORUN_SERVICE}"
 }
 
 disable_autoresume_service() {
   rm -f "${AUTORUN_DESKTOP}" "${AUTORUN_TERMINAL_SCRIPT}" 2>/dev/null || true
 
   if command -v systemctl >/dev/null 2>&1; then
-    sudo systemctl disable "${AUTORUN_SERVICE}" >/dev/null 2>&1 || true
-    sudo rm -f "/etc/systemd/system/${AUTORUN_SERVICE}" 2>/dev/null || true
-    sudo systemctl daemon-reload >/dev/null 2>&1 || true
+    run_sudo systemctl disable "${AUTORUN_SERVICE}" >/dev/null 2>&1 || true
+    run_sudo rm -f "/etc/systemd/system/${AUTORUN_SERVICE}" 2>/dev/null || true
+    run_sudo systemctl daemon-reload >/dev/null 2>&1 || true
   fi
 }
 
@@ -298,7 +352,30 @@ fix_output_ownership_if_root() {
 mode_recorded() {
   local id="$1"
   [[ -s "${RESULT_FILE}" ]] || return 1
-  grep -Eq "^(===== Power Mode: ${id} |Requested mode    : ${id} )" "${RESULT_FILE}"
+  awk -v id="${id}" '
+    function complete() {
+      return in_target && saw_cpu && saw_gpu && saw_emc
+    }
+    /^===== Power Mode: / {
+      if (complete()) {
+        found = 1
+      }
+      in_target = ($0 ~ "^===== Power Mode: " id " ")
+      saw_cpu = 0
+      saw_gpu = 0
+      saw_emc = 0
+      next
+    }
+    in_target && /^cpu[0-9]+: MaxFreq=/ { saw_cpu = 1 }
+    in_target && /^GPU MaxFreq=/ { saw_gpu = 1 }
+    in_target && /^EMC MaxFreq=/ { saw_emc = 1 }
+    END {
+      if (complete()) {
+        found = 1
+      }
+      exit found ? 0 : 1
+    }
+  ' "${RESULT_FILE}"
 }
 
 show_record_progress() {
@@ -393,7 +470,7 @@ try_switch_mode_without_reboot() {
   output_file="${LOG_DIR}/nvpmodel_switch_${mode_id}.last"
   : > "${output_file}"
 
-  printf '\n' | sudo nvpmodel -m "${mode_id}" 2>&1 | tee -a "${log_file}" | tee "${output_file}"
+  run_nvpmodel_decline_reboot "${mode_id}" 2>&1 | tee -a "${log_file}" | tee "${output_file}"
   rc=${PIPESTATUS[1]}
 
   if grep -qi 'reboot required\|restart required\|DO YOU WANT TO REBOOT' "${output_file}"; then
@@ -435,7 +512,7 @@ switch_mode_with_reboot() {
     install_autoresume_service
   fi
 
-  printf 'YES\n' | sudo nvpmodel -m "${mode_id}" 2>&1 | tee -a "${log_file}"
+  run_nvpmodel_confirm_reboot "${mode_id}" 2>&1 | tee -a "${log_file}"
   rc=${PIPESTATUS[1]}
 
   if [[ "${rc}" -ne 0 ]]; then
