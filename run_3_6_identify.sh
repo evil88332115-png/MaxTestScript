@@ -141,7 +141,7 @@ def normalize_command(command):
     if command == "top":
         return "top -b -n 1 | head -n 6"
     if command.startswith("xdpyinfo"):
-        return "DISPLAY=${DISPLAY:-:0} xdpyinfo | head -n 32"
+        return "DISPLAY=${DISPLAY:-:0} xdpyinfo | awk '{print} /^number of screens:/ {exit}'"
     if command == "cat /proc/device-tree/model":
         return "tr -d '\\0' < /proc/device-tree/model"
     if command == "lspci":
