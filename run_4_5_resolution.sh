@@ -90,7 +90,7 @@ def row_texts(row):
     return [cell_text(cell) for cell in row.findall("w:tc", NS)]
 
 
-def set_cell_text(cell, value, color=None):
+def set_cell_text(cell, value, color=None, clear_highlight=False):
     first_run = cell.find(".//w:r", NS)
     run = first_run
     run_pr = run.find("w:rPr", NS) if run is not None else None
@@ -104,6 +104,12 @@ def set_cell_text(cell, value, color=None):
     run = ET.SubElement(paragraph, f"{{{W_NS}}}r")
     if run_pr is not None:
         run.append(copy.deepcopy(run_pr))
+    if str(value):
+        tcpr = cell.find("w:tcPr", NS)
+        if tcpr is not None:
+            old_shading = tcpr.find("w:shd", NS)
+            if old_shading is not None and old_shading.attrib.get(f"{{{W_NS}}}val") == "thinDiagCross":
+                tcpr.remove(old_shading)
     if color:
         run_pr = run.find("w:rPr", NS)
         if run_pr is None:
@@ -113,6 +119,13 @@ def set_cell_text(cell, value, color=None):
             run_pr.remove(old_color)
         color_node = ET.SubElement(run_pr, f"{{{W_NS}}}color")
         color_node.set(f"{{{W_NS}}}val", color)
+    if clear_highlight:
+        run_pr = run.find("w:rPr", NS)
+        if run_pr is not None:
+            for old_highlight in run_pr.findall("w:highlight", NS):
+                run_pr.remove(old_highlight)
+            for old_shading in run_pr.findall("w:shd", NS):
+                run_pr.remove(old_shading)
 
     lines = str(value).splitlines() or [""]
     for index, line in enumerate(lines):
@@ -156,6 +169,39 @@ def apply_blank_shading(cell, shading):
     if old_shading is not None:
         tcpr.remove(old_shading)
     tcpr.append(copy.deepcopy(shading))
+
+
+def set_recording_cell_text(cell, value):
+    paragraphs = cell.findall("w:p", NS)
+    first_p_pr = copy.deepcopy(paragraphs[0].find("w:pPr", NS)) if paragraphs else None
+    first_run = paragraphs[0].find("w:r", NS) if paragraphs else None
+    first_run_pr = copy.deepcopy(first_run.find("w:rPr", NS)) if first_run is not None else None
+
+    body_source = paragraphs[1] if len(paragraphs) > 1 else paragraphs[0] if paragraphs else None
+    body_p_pr = copy.deepcopy(body_source.find("w:pPr", NS)) if body_source is not None else None
+    body_run = body_source.find("w:r", NS) if body_source is not None else None
+    body_run_pr = copy.deepcopy(body_run.find("w:rPr", NS)) if body_run is not None else first_run_pr
+
+    for child in list(cell):
+        if child.tag != f"{{{W_NS}}}tcPr":
+            cell.remove(child)
+
+    lines = str(value).splitlines() or [""]
+    for index, line in enumerate(lines):
+        paragraph = ET.SubElement(cell, f"{{{W_NS}}}p")
+        p_pr = first_p_pr if index == 0 else body_p_pr
+        if p_pr is not None:
+            paragraph.append(copy.deepcopy(p_pr))
+
+        run = ET.SubElement(paragraph, f"{{{W_NS}}}r")
+        run_pr = first_run_pr if index == 0 else body_run_pr
+        if run_pr is not None:
+            run.append(copy.deepcopy(run_pr))
+
+        text_node = ET.SubElement(run, f"{{{W_NS}}}t")
+        if line[:1].isspace() or line[-1:].isspace():
+            text_node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        text_node.text = line
 
 
 def normalize_mode(value):
@@ -345,7 +391,7 @@ if recording_cell is not None:
             recording_sections.append(f"$ {restore_command}\nERROR({returncode}): {output}\n{restored}")
 
     recording_text = "Resolution and Frequency\n" + "\n\n".join(recording_sections)
-    set_cell_text(recording_cell, recording_text)
+    set_recording_cell_text(recording_cell, recording_text)
 
 for cell in root.findall(".//w:tc", NS):
     if clean_cell(cell_text(cell)) == "":
