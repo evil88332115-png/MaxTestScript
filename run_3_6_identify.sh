@@ -88,7 +88,7 @@ def row_texts(row):
     return [cell_text(cell) for cell in row.findall("w:tc", NS)]
 
 
-def set_cell_text(cell, value):
+def set_cell_text(cell, value, color=None):
     paragraphs = cell.findall("w:p", NS)
     if not paragraphs:
         paragraph = ET.SubElement(cell, f"{{{W_NS}}}p")
@@ -105,6 +105,15 @@ def set_cell_text(cell, value):
     run = ET.SubElement(paragraph, f"{{{W_NS}}}r")
     if run_pr is not None:
         run.append(copy.deepcopy(run_pr))
+    if color:
+        run_pr = run.find("w:rPr", NS)
+        if run_pr is None:
+            run_pr = ET.Element(f"{{{W_NS}}}rPr")
+            run.insert(0, run_pr)
+        for old_color in run_pr.findall("w:color", NS):
+            run_pr.remove(old_color)
+        color_node = ET.SubElement(run_pr, f"{{{W_NS}}}color")
+        color_node.set(f"{{{W_NS}}}val", color)
 
     lines = str(value).splitlines() or [""]
     for index, line in enumerate(lines):
@@ -183,6 +192,22 @@ def run_command(command):
     return output
 
 
+def read_os_version():
+    try:
+        with open("/etc/os_version", "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def check_desktop_os_version_file():
+    version = read_os_version()
+    if not version:
+        return "", False
+    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop", version)
+    return version, os.path.exists(desktop_path)
+
+
 with zipfile.ZipFile(template_path, "r") as source:
     document_xml = source.read("word/document.xml")
 
@@ -215,6 +240,14 @@ for row in rows[1:]:
 
     if is_dangerous(command_text, operation_text):
         set_cell_text(cells[record_index], "OK")
+        continue
+
+    if "check the text file exist" in command_text.lower() and "desktop" in command_text.lower():
+        version, exists = check_desktop_os_version_file()
+        if exists:
+            set_cell_text(cells[record_index], version)
+        else:
+            set_cell_text(cells[record_index], "Failed", color="FF0000")
         continue
 
     commands = split_template_commands(command_text)
