@@ -1,343 +1,291 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ============================================================
-# 4-5 Resolution Test
-#
-# Detect all available resolutions from the current connected display,
-# switch from largest to smallest, verify each switch, then return to
-# the largest resolution.
-#
-# Requirement:
-#   xrandr
-# ============================================================
-
-export DISPLAY="${DISPLAY:-:0}"
-VERIFY_TIMEOUT_SECONDS="${VERIFY_TIMEOUT_SECONDS:-8}"
-VERIFY_INTERVAL_SECONDS="${VERIFY_INTERVAL_SECONDS:-1}"
-MIN_WIDTH="${MIN_WIDTH:-720}"
-MIN_HEIGHT="${MIN_HEIGHT:-576}"
-MODE_SOURCE="unknown"
-GNOME_INTERFACE_SCHEMA="org.gnome.desktop.interface"
-GNOME_MUTTER_SCHEMA="org.gnome.mutter"
-ORIGINAL_SCALING_FACTOR=""
-ORIGINAL_TEXT_SCALING_FACTOR=""
-ORIGINAL_EXPERIMENTAL_FEATURES=""
-
-if [ -t 1 ]; then
-  RED="\033[31m"
-  GREEN="\033[32m"
-  YELLOW="\033[33m"
-  NC="\033[0m"
+if [[ -t 1 && "${TERM:-dumb}" != "dumb" ]]; then
+  COLOR_TITLE=$'\033[1;36m'
+  COLOR_ERROR=$'\033[1;31m'
+  COLOR_RESET=$'\033[0m'
 else
-  RED=""
-  GREEN=""
-  YELLOW=""
-  NC=""
+  COLOR_TITLE=""
+  COLOR_ERROR=""
+  COLOR_RESET=""
 fi
 
-pass() { echo -e "${GREEN}$*${NC}"; }
-fail() { echo -e "${RED}$*${NC}"; }
-warn() { echo -e "${YELLOW}$*${NC}"; }
-
-require_cmd() {
-  local cmd="$1"
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "ERROR: required command not found: $cmd" >&2
-    exit 1
-  fi
+die() {
+  printf '%sERROR: %s%s\n' "${COLOR_ERROR}" "$*" "${COLOR_RESET}" >&2
+  exit 1
 }
 
-get_connected_output() {
-  xrandr --display "$DISPLAY" | awk '/ connected/ { print $1; exit }'
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is not installed"
 }
 
-get_current_resolution() {
-  local output="$1"
-  xrandr --display "$DISPLAY" | awk -v output="$output" '
-    $1 == output && $2 == "connected" {
-      for (i=1; i<=NF; i++) {
-        if ($i ~ /^[0-9]+x[0-9]+\+/) {
-          split($i, parts, "+")
-          print parts[1]
-          exit
-        }
-      }
-    }
-    in_output && /\*/ {
-      print $1
-      exit
-    }
-    $1 == output && $2 == "connected" { in_output=1; next }
-    /^[A-Za-z0-9-]+ connected/ && $1 != output { in_output=0 }
-  '
-}
+need_cmd python3
+need_cmd xrandr
 
-list_resolutions_desc() {
-  local output="$1"
-  xrandr --display "$DISPLAY" | awk -v output="$output" '
-    $1 == output && $2 == "connected" { in_output=1; next }
-    /^[A-Za-z0-9-]+ connected/ && $1 != output { in_output=0 }
-    in_output && $1 ~ /^[0-9]+x[0-9]+$/ {
-      split($1, dim, "x")
-      key = dim[1] * dim[2]
-      if (!seen[$1]++) {
-        printf "%d %d %s\n", key, dim[1], $1
-      }
-    }
-  ' | sort -k1,1nr -k2,2nr | awk '{ print $3 }'
-}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+OUTPUT_DIR="${HOME}/4-5Resolution"
+DOCX_FILE="${OUTPUT_DIR}/4-5_Resolution.docx"
+mkdir -p "${OUTPUT_DIR}"
 
-list_resolutions_from_mutter_desc() {
-  local output="$1"
-
-  if ! command -v gdbus >/dev/null 2>&1; then
-    return 1
-  fi
-
-  gdbus call --session \
-    --dest org.gnome.Mutter.DisplayConfig \
-    --object-path /org/gnome/Mutter/DisplayConfig \
-    --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null \
-    | python3 - "$output" "$MIN_WIDTH" "$MIN_HEIGHT" <<'PY'
-import re
-import sys
-
-target_output = sys.argv[1]
-min_width = int(sys.argv[2])
-min_height = int(sys.argv[3])
-text = sys.stdin.read()
-
-pattern = re.compile(
-    r"\('([^']+)',\s*([0-9]+),\s*([0-9]+),\s*([0-9.]+),\s*[0-9.]+,\s*\[[^\]]*\],\s*\{([^}]*)\}\)"
-)
-
-seen = {}
-for mode_id, width, height, refresh, props in pattern.findall(text):
-    if "x" not in mode_id:
-        continue
-    try:
-        w = int(width)
-        h = int(height)
-        hz = float(refresh)
-    except ValueError:
-        continue
-    if w < min_width or h < min_height:
-        continue
-
-    # Deduplicate by resolution. Prefer current/preferred, then higher refresh.
-    resolution = f"{w}x{h}"
-    priority = 0
-    if "is-current" in props:
-        priority += 100000
-    if "is-preferred" in props:
-        priority += 50000
-    priority += hz
-    old = seen.get(resolution)
-    if old is None or priority > old[0]:
-        seen[resolution] = (priority, w * h, w, h)
-
-for resolution, (_priority, area, w, _h) in sorted(
-    seen.items(), key=lambda item: (-item[1][1], -item[1][2], item[0])
-):
-    print(resolution)
-PY
-}
-
-list_resolutions_from_xrandr_filtered_desc() {
-  local output="$1"
-  list_resolutions_desc "$output" | awk -F'x' -v min_w="$MIN_WIDTH" -v min_h="$MIN_HEIGHT" '
-    $1 >= min_w && $2 >= min_h { print $0 }
-  '
-}
-
-switch_resolution() {
-  local output="$1"
-  local resolution="$2"
-  echo ""
-  echo "Switching ${output} to ${resolution}"
-  echo "Command: xrandr --display ${DISPLAY} --output ${output} --mode ${resolution} --scale 1x1"
-  xrandr --display "$DISPLAY" --output "$output" --mode "$resolution" --scale 1x1
-  force_100_percent_scaling
-}
-
-verify_resolution() {
-  local output="$1"
-  local expected="$2"
-  local elapsed=0
-  local current=""
-
-  while [ "$elapsed" -le "$VERIFY_TIMEOUT_SECONDS" ]; do
-    current="$(get_current_resolution "$output")"
-    if [ "$current" = "$expected" ]; then
-      pass "RESULT,RESOLUTION,${output},${expected},MODE_PASS"
-      return 0
+DOCX_TEMPLATE="${DOCX_TEMPLATE:-}"
+if [[ -z "${DOCX_TEMPLATE}" ]]; then
+  for candidate in \
+    "${OUTPUT_DIR}/4-5_template.docx" \
+    "${SCRIPT_DIR}/4-5_template.docx" \
+    "${SCRIPT_DIR}/../4-5_template.docx" \
+    "${PWD}/4-5_template.docx"; do
+    if [[ -r "${candidate}" ]]; then
+      DOCX_TEMPLATE="${candidate}"
+      break
     fi
-    sleep "$VERIFY_INTERVAL_SECONDS"
-    elapsed=$((elapsed + VERIFY_INTERVAL_SECONDS))
   done
+fi
 
-  fail "RESULT,RESOLUTION,${output},${expected},MODE_FAIL,current=${current:-unknown}"
-  return 1
-}
+if [[ -z "${DOCX_TEMPLATE}" || ! -r "${DOCX_TEMPLATE}" ]]; then
+  die "Word template not found. Put 4-5_template.docx in ${SCRIPT_DIR} or set DOCX_TEMPLATE=/path/to/4-5_template.docx"
+fi
 
-save_gnome_scaling() {
-  if ! command -v gsettings >/dev/null 2>&1; then
-    return 0
-  fi
-
-  ORIGINAL_SCALING_FACTOR="$(gsettings get "$GNOME_INTERFACE_SCHEMA" scaling-factor 2>/dev/null || true)"
-  ORIGINAL_TEXT_SCALING_FACTOR="$(gsettings get "$GNOME_INTERFACE_SCHEMA" text-scaling-factor 2>/dev/null || true)"
-  ORIGINAL_EXPERIMENTAL_FEATURES="$(gsettings get "$GNOME_MUTTER_SCHEMA" experimental-features 2>/dev/null || true)"
-}
-
-force_100_percent_scaling() {
-  if command -v gsettings >/dev/null 2>&1; then
-    gsettings set "$GNOME_INTERFACE_SCHEMA" scaling-factor 1 2>/dev/null || true
-    gsettings set "$GNOME_INTERFACE_SCHEMA" text-scaling-factor 1.0 2>/dev/null || true
-  fi
-}
-
-restore_gnome_scaling() {
-  if ! command -v gsettings >/dev/null 2>&1; then
-    return 0
-  fi
-
-  echo ""
-  echo "Restoring GNOME scaling settings if available..."
-  if [ -n "$ORIGINAL_SCALING_FACTOR" ]; then
-    echo "Restore scaling-factor: $ORIGINAL_SCALING_FACTOR"
-    gsettings set "$GNOME_INTERFACE_SCHEMA" scaling-factor "$ORIGINAL_SCALING_FACTOR" 2>/dev/null || true
-  fi
-  if [ -n "$ORIGINAL_TEXT_SCALING_FACTOR" ]; then
-    echo "Restore text-scaling-factor: $ORIGINAL_TEXT_SCALING_FACTOR"
-    gsettings set "$GNOME_INTERFACE_SCHEMA" text-scaling-factor "$ORIGINAL_TEXT_SCALING_FACTOR" 2>/dev/null || true
-  fi
-  if [ -n "$ORIGINAL_EXPERIMENTAL_FEATURES" ]; then
-    echo "Restore mutter experimental-features: $ORIGINAL_EXPERIMENTAL_FEATURES"
-    gsettings set "$GNOME_MUTTER_SCHEMA" experimental-features "$ORIGINAL_EXPERIMENTAL_FEATURES" 2>/dev/null || true
-  fi
-}
-
-confirm_visible() {
-  local output="$1"
-  local resolution="$2"
-  local answer
-
-  if [ ! -t 0 ]; then
-    warn "Non-interactive shell; cannot confirm visible display."
-    return 0
-  fi
-
-  echo ""
-  echo "Resolution ${resolution} is set on ${output}."
-  read -r -p "If the display is visible/correct, press Enter to continue. Type n to mark FAIL and continue: " answer
-  case "$answer" in
-    n|N|no|NO)
-      fail "RESULT,RESOLUTION,${output},${resolution},VISIBLE_FAIL"
-      return 1
-      ;;
-    *)
-      pass "RESULT,RESOLUTION,${output},${resolution},VISIBLE_PASS"
-      return 0
-      ;;
-  esac
-}
-
-handle_interrupt() {
-  echo ""
-  echo "Interrupted. Returning to maximum resolution and restoring scaling..."
-  if [ -n "${OUTPUT:-}" ] && [ -n "${MAX_RESOLUTION:-}" ]; then
-    xrandr --display "$DISPLAY" --output "$OUTPUT" --mode "$MAX_RESOLUTION" 2>/dev/null || true
-  fi
-  restore_gnome_scaling
-  exit 130
-}
-
-echo "======================================"
-echo "4-5 Resolution Test"
+printf '%s4-5 Resolution%s\n' "${COLOR_TITLE}" "${COLOR_RESET}"
 echo "Host: $(hostname)"
-echo "Date: $(date -Iseconds)"
-echo "DISPLAY: ${DISPLAY}"
-echo "Minimum resolution: ${MIN_WIDTH}x${MIN_HEIGHT}"
-echo "======================================"
+echo "Date: $(date --iso-8601=seconds)"
+echo "Template: ${DOCX_TEMPLATE}"
+echo "Word: ${DOCX_FILE}"
+echo
 
-require_cmd xrandr
-save_gnome_scaling
-trap handle_interrupt INT TERM
+python3 - "${DOCX_TEMPLATE}" "${DOCX_FILE}" <<'PY'
+import copy
+import os
+import re
+import subprocess
+import sys
+import time
+import zipfile
+import xml.etree.ElementTree as ET
 
-OUTPUT="${OUTPUT:-$(get_connected_output)}"
-if [ -z "$OUTPUT" ]; then
-  echo "ERROR: no connected display output found by xrandr." >&2
-  exit 1
-fi
+template_path = sys.argv[1]
+output_path = sys.argv[2]
 
-mapfile -t RESOLUTIONS < <(list_resolutions_from_mutter_desc "$OUTPUT")
-if [ "${#RESOLUTIONS[@]}" -gt 0 ]; then
-  MODE_SOURCE="gnome-mutter-displayconfig"
-else
-  warn "Could not read resolutions from GNOME Mutter DisplayConfig; fallback to xrandr."
-  mapfile -t RESOLUTIONS < <(list_resolutions_from_xrandr_filtered_desc "$OUTPUT")
-  MODE_SOURCE="xrandr"
-fi
+NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+W_NS = NS["w"]
+ET.register_namespace("w", W_NS)
 
-if [ "${#RESOLUTIONS[@]}" -eq 0 ]; then
-  echo "ERROR: no resolutions found for output: $OUTPUT" >&2
-  xrandr --display "$DISPLAY"
-  exit 1
-fi
 
-ORIGINAL_RESOLUTION="$(get_current_resolution "$OUTPUT")"
-MAX_RESOLUTION="${RESOLUTIONS[0]}"
+def local_name(tag):
+    return tag.rsplit("}", 1)[-1]
 
-echo "Output: ${OUTPUT}"
-echo "Resolution source: ${MODE_SOURCE}"
-echo "Original resolution: ${ORIGINAL_RESOLUTION:-unknown}"
-echo "Original GNOME scaling-factor: ${ORIGINAL_SCALING_FACTOR:-unknown}"
-echo "Original GNOME text-scaling-factor: ${ORIGINAL_TEXT_SCALING_FACTOR:-unknown}"
-echo "Detected resolutions from largest to smallest:"
-for resolution in "${RESOLUTIONS[@]}"; do
-  echo "  ${resolution}"
-done
 
-echo ""
-echo "The screen will switch through all detected resolutions."
-if [ -t 0 ]; then
-  read -r -p "Press Enter to start, or type n to cancel: " answer
-  case "$answer" in
-    n|N|no|NO)
-      echo "Canceled."
-      exit 0
-      ;;
-  esac
-fi
+def cell_text(cell):
+    parts = []
+    for elem in cell.iter():
+        name = local_name(elem.tag)
+        if name == "t":
+            parts.append(elem.text or "")
+        elif name == "br":
+            parts.append("\n")
+    return "".join(parts).strip()
 
-overall_rc=0
-for resolution in "${RESOLUTIONS[@]}"; do
-  if switch_resolution "$OUTPUT" "$resolution" && verify_resolution "$OUTPUT" "$resolution"; then
-    if ! confirm_visible "$OUTPUT" "$resolution"; then
-      overall_rc=1
-    fi
-  else
-    overall_rc=1
-  fi
-done
 
-echo ""
-echo "Returning to maximum resolution: ${MAX_RESOLUTION}"
-if switch_resolution "$OUTPUT" "$MAX_RESOLUTION" && verify_resolution "$OUTPUT" "$MAX_RESOLUTION"; then
-  confirm_visible "$OUTPUT" "$MAX_RESOLUTION" || overall_rc=1
-else
-  overall_rc=1
-fi
+def row_texts(row):
+    return [cell_text(cell) for cell in row.findall("w:tc", NS)]
 
-restore_gnome_scaling
 
-echo ""
-if [ "$overall_rc" -eq 0 ]; then
-  pass "TEST COMPLETE: 4-5 Resolution = PASS"
-else
-  fail "TEST COMPLETE: 4-5 Resolution = FAIL"
-fi
+def set_cell_text(cell, value, color=None):
+    first_run = cell.find(".//w:r", NS)
+    run = first_run
+    run_pr = run.find("w:rPr", NS) if run is not None else None
 
-exit "$overall_rc"
+    for child in list(cell):
+        if child.tag != f"{{{W_NS}}}tcPr":
+            cell.remove(child)
+
+    paragraph = ET.SubElement(cell, f"{{{W_NS}}}p")
+
+    run = ET.SubElement(paragraph, f"{{{W_NS}}}r")
+    if run_pr is not None:
+        run.append(copy.deepcopy(run_pr))
+    if color:
+        run_pr = run.find("w:rPr", NS)
+        if run_pr is None:
+            run_pr = ET.Element(f"{{{W_NS}}}rPr")
+            run.insert(0, run_pr)
+        for old_color in run_pr.findall("w:color", NS):
+            run_pr.remove(old_color)
+        color_node = ET.SubElement(run_pr, f"{{{W_NS}}}color")
+        color_node.set(f"{{{W_NS}}}val", color)
+
+    lines = str(value).splitlines() or [""]
+    for index, line in enumerate(lines):
+        if index:
+            ET.SubElement(run, f"{{{W_NS}}}br")
+        text_node = ET.SubElement(run, f"{{{W_NS}}}t")
+        if line[:1].isspace() or line[-1:].isspace():
+            text_node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        text_node.text = line
+
+
+def normalize_mode(value):
+    return value.strip().lower().replace("x", "x")
+
+
+def clean_cell(value):
+    return value.replace("\u3000", "").strip()
+
+
+def run_shell(command, timeout=15):
+    env = os.environ.copy()
+    env.setdefault("DISPLAY", ":0")
+    proc = subprocess.run(
+        command,
+        shell=True,
+        executable="/bin/bash",
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+    )
+    return proc.returncode, proc.stdout.strip()
+
+
+def xrandr_output():
+    _, output = run_shell("xrandr", timeout=10)
+    return output
+
+
+def current_mode_rate(xrandr_text, output_name):
+    lines = xrandr_text.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith(output_name + " connected"):
+            match = re.search(r"\b(\d+x\d+)\+", line)
+            mode = match.group(1) if match else ""
+            for mode_line in lines[index + 1:]:
+                if not mode_line.startswith("   "):
+                    break
+                if "*" in mode_line:
+                    tokens = mode_line.split()
+                    active_mode = tokens[0]
+                    active_rate = ""
+                    for token in tokens[1:]:
+                        if "*" in token:
+                            active_rate = token.replace("*", "").replace("+", "")
+                            break
+                    return mode or active_mode, active_rate
+            return mode, ""
+    return "", ""
+
+
+def is_mode_rate_available(xrandr_text, mode, rate):
+    wanted_mode = normalize_mode(mode)
+    mode_line = None
+    for line in xrandr_text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith(wanted_mode + " "):
+            mode_line = stripped
+            break
+    if not mode_line:
+        return False
+    return re.search(rf"(?<!\d){re.escape(rate)}(?!\d)", mode_line) is not None
+
+
+with zipfile.ZipFile(template_path, "r") as source:
+    document_xml = source.read("word/document.xml")
+
+root = ET.fromstring(document_xml)
+tables = root.findall(".//w:tbl", NS)
+if not tables:
+    raise RuntimeError("Template does not contain a Word table")
+
+table = tables[0]
+rows = table.findall("w:tr", NS)
+recording_cell = None
+recording_sections = []
+current_output = "HDMI-0"
+initial_xrandr = xrandr_output()
+initial_mode, initial_rate = current_mode_rate(initial_xrandr, current_output)
+
+for candidate_table in tables:
+    candidate_rows = candidate_table.findall("w:tr", NS)
+    for row_index, row in enumerate(candidate_rows):
+        values = row_texts(row)
+        if not values or values[0] != "Recording":
+            continue
+        for next_row in candidate_rows[row_index + 1:]:
+            for cell in next_row.findall("w:tc", NS):
+                if "Resolution and Frequency" in cell_text(cell):
+                    recording_cell = cell
+                    break
+            if recording_cell is not None:
+                break
+        break
+    if recording_cell is not None:
+        break
+
+for row_index, row in enumerate(rows):
+    values = row_texts(row)
+    if not values:
+        continue
+
+    if values[0].startswith("HDMI"):
+        current_output = values[0]
+        continue
+
+    command_text = values[0] if values else ""
+    if "xrandr --output" not in command_text:
+        continue
+
+    cells = row.findall("w:tc", NS)
+    if len(values) < 3 or len(cells) < 3:
+        continue
+
+    previous_row = row_texts(rows[row_index - 1]) if row_index > 0 else []
+    mode = clean_cell(previous_row[1]) if len(previous_row) > 1 else ""
+    if not mode:
+        continue
+
+    available_text = xrandr_output()
+    for cell_index in range(1, min(len(values), len(cells))):
+        rate_index = cell_index + 1
+        rate = clean_cell(previous_row[rate_index]) if rate_index < len(previous_row) else ""
+        if not rate:
+            continue
+
+        mode_arg = normalize_mode(mode)
+        command = f"xrandr --output {current_output} --mode {mode_arg} -r {rate}"
+        if not is_mode_rate_available(available_text, mode, rate):
+            set_cell_text(cells[cell_index], "Failed", color="FF0000")
+            recording_sections.append(f"$ {command}\nFailed: mode/rate not listed by xrandr")
+            continue
+
+        returncode, output = run_shell(command, timeout=15)
+        time.sleep(0.5)
+        after = xrandr_output()
+        if returncode == 0:
+            set_cell_text(cells[cell_index], "OK")
+            recording_sections.append(f"$ {command}\n{after}")
+        else:
+            set_cell_text(cells[cell_index], "Failed", color="FF0000")
+            recording_sections.append(f"$ {command}\nERROR({returncode}): {output}\n{after}")
+        available_text = after
+
+if recording_cell is not None:
+    if initial_mode and initial_rate:
+        restore_command = f"xrandr --output {current_output} --mode {initial_mode} -r {initial_rate}"
+        returncode, output = run_shell(restore_command, timeout=15)
+        restored = xrandr_output()
+        if returncode == 0:
+            recording_sections.append(f"$ {restore_command}\n{restored}")
+        else:
+            recording_sections.append(f"$ {restore_command}\nERROR({returncode}): {output}\n{restored}")
+
+    recording_text = "Resolution and Frequency\n" + "\n\n".join(recording_sections)
+    set_cell_text(recording_cell, recording_text)
+
+updated_document = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+with zipfile.ZipFile(template_path, "r") as source, zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as target:
+    for item in source.infolist():
+        content = updated_document if item.filename == "word/document.xml" else source.read(item.filename)
+        target.writestr(item, content)
+
+print(f"Generated: {output_path}")
+PY
