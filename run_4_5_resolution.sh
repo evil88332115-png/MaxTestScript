@@ -188,6 +188,22 @@ def is_mode_rate_available(xrandr_text, mode, rate):
     return re.search(rf"(?<!\d){re.escape(rate)}(?!\d)", mode_line) is not None
 
 
+def supported_rates_for_mode(xrandr_text, mode):
+    wanted_mode = normalize_mode(mode)
+    for line in xrandr_text.splitlines():
+        stripped = line.strip()
+        if not stripped.lower().startswith(wanted_mode + " "):
+            continue
+
+        rates = []
+        for token in stripped.split()[1:]:
+            rate = token.replace("*", "").replace("+", "")
+            if re.fullmatch(r"\d+(?:\.\d+)?", rate):
+                rates.append(rate)
+        return rates
+    return []
+
+
 with zipfile.ZipFile(template_path, "r") as source:
     document_xml = source.read("word/document.xml")
 
@@ -243,28 +259,41 @@ for row_index, row in enumerate(rows):
     if not mode:
         continue
 
+    set_cell_text(cells[0], f"$ xrandr --verbose\n$ xrandr --output {current_output} --mode {mode} -r  [ refresh rate ]\n$ xrandr")
+
     available_text = xrandr_output()
-    for cell_index in range(1, min(len(values), len(cells))):
-        rate_index = cell_index + 1
-        rate = clean_cell(previous_row[rate_index]) if rate_index < len(previous_row) else ""
-        if not rate:
-            continue
+    supported_rates = supported_rates_for_mode(available_text, mode)
+    previous_cells = rows[row_index - 1].findall("w:tc", NS) if row_index > 0 else []
+    rate_slots = max(0, min(len(previous_cells) - 2, len(cells) - 1))
+
+    for slot in range(rate_slots):
+        rate_cell_index = slot + 2
+        result_cell_index = slot + 1
+        if slot < len(supported_rates):
+            set_cell_text(previous_cells[rate_cell_index], supported_rates[slot])
+        else:
+            set_cell_text(previous_cells[rate_cell_index], "")
+            set_cell_text(cells[result_cell_index], "")
+
+    if not supported_rates:
+        if len(cells) > 1:
+            set_cell_text(cells[1], "Failed", color="FF0000")
+        recording_sections.append(f"{mode} is not listed by xrandr on {current_output}")
+        continue
+
+    for slot, rate in enumerate(supported_rates[:rate_slots]):
+        result_cell_index = slot + 1
 
         mode_arg = normalize_mode(mode)
         command = f"xrandr --output {current_output} --mode {mode_arg} -r {rate}"
-        if not is_mode_rate_available(available_text, mode, rate):
-            set_cell_text(cells[cell_index], "Failed", color="FF0000")
-            recording_sections.append(f"$ {command}\nFailed: mode/rate not listed by xrandr")
-            continue
-
         returncode, output = run_shell(command, timeout=15)
         time.sleep(0.5)
         after = xrandr_output()
         if returncode == 0:
-            set_cell_text(cells[cell_index], "OK")
+            set_cell_text(cells[result_cell_index], "OK")
             recording_sections.append(f"$ {command}\n{after}")
         else:
-            set_cell_text(cells[cell_index], "Failed", color="FF0000")
+            set_cell_text(cells[result_cell_index], "Failed", color="FF0000")
             recording_sections.append(f"$ {command}\nERROR({returncode}): {output}\n{after}")
         available_text = after
 
