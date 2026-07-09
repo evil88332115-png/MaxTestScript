@@ -124,6 +124,40 @@ def set_cell_text(cell, value, color=None):
         text_node.text = line
 
 
+def get_tcpr(cell):
+    tcpr = cell.find("w:tcPr", NS)
+    if tcpr is None:
+        tcpr = ET.Element(f"{{{W_NS}}}tcPr")
+        cell.insert(0, tcpr)
+    return tcpr
+
+
+def find_blank_pattern_shading(root):
+    fallback = None
+    for cell in root.findall(".//w:tc", NS):
+        if cell_text(cell):
+            continue
+        shading = cell.find("w:tcPr/w:shd", NS)
+        if shading is None:
+            continue
+        if fallback is None:
+            fallback = copy.deepcopy(shading)
+        shading_val = shading.attrib.get(f"{{{W_NS}}}val", "")
+        if shading_val and shading_val != "clear":
+            return copy.deepcopy(shading)
+    return fallback
+
+
+def apply_blank_shading(cell, shading):
+    if shading is None:
+        return
+    tcpr = get_tcpr(cell)
+    old_shading = tcpr.find("w:shd", NS)
+    if old_shading is not None:
+        tcpr.remove(old_shading)
+    tcpr.append(copy.deepcopy(shading))
+
+
 def normalize_mode(value):
     return value.strip().lower().replace("x", "x")
 
@@ -208,6 +242,7 @@ with zipfile.ZipFile(template_path, "r") as source:
     document_xml = source.read("word/document.xml")
 
 root = ET.fromstring(document_xml)
+blank_pattern_shading = find_blank_pattern_shading(root)
 tables = root.findall(".//w:tbl", NS)
 if not tables:
     raise RuntimeError("Template does not contain a Word table")
@@ -273,7 +308,9 @@ for row_index, row in enumerate(rows):
             set_cell_text(previous_cells[rate_cell_index], supported_rates[slot])
         else:
             set_cell_text(previous_cells[rate_cell_index], "")
+            apply_blank_shading(previous_cells[rate_cell_index], blank_pattern_shading)
             set_cell_text(cells[result_cell_index], "")
+            apply_blank_shading(cells[result_cell_index], blank_pattern_shading)
 
     if not supported_rates:
         if len(cells) > 1:
@@ -309,6 +346,10 @@ if recording_cell is not None:
 
     recording_text = "Resolution and Frequency\n" + "\n\n".join(recording_sections)
     set_cell_text(recording_cell, recording_text)
+
+for cell in root.findall(".//w:tc", NS):
+    if clean_cell(cell_text(cell)) == "":
+        apply_blank_shading(cell, blank_pattern_shading)
 
 updated_document = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 with zipfile.ZipFile(template_path, "r") as source, zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as target:
