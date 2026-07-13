@@ -58,8 +58,26 @@ unmount_usb_mount() {
 }
 
 find_usb_mounts() {
-  findmnt -rn -o TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL \
-    | awk '$1 ~ "^/media/" { print }'
+  local target
+
+  while IFS= read -r target; do
+    target="$(printf '%b' "${target}")"
+    if [[ "${target}" == /media/* ]]; then
+      printf '%s\n' "${target}"
+    fi
+  done < <(findmnt -rn -o TARGET)
+}
+
+print_mount_detail() {
+  local mount_path="$1"
+  local detail
+
+  detail="$(findmnt -rn -o SOURCE,FSTYPE,SIZE,USED,AVAIL --mountpoint "${mount_path}" 2>/dev/null | head -n 1 || true)"
+  if [[ -n "${detail}" ]]; then
+    printf '%s %s\n' "${mount_path}" "${detail}"
+  else
+    printf '%s\n' "${mount_path}"
+  fi
 }
 
 select_mount() {
@@ -76,7 +94,8 @@ select_mount() {
   echo "Detected USB mount path(s):" >&2
   local i
   for i in "${!mounts[@]}"; do
-    printf '  [%d] %s\n' "$((i + 1))" "${mounts[$i]}" >&2
+    printf '  [%d] ' "$((i + 1))" >&2
+    print_mount_detail "${mounts[$i]}" >&2
   done
   echo >&2
 
@@ -86,7 +105,7 @@ select_mount() {
   fi
 
   if [[ "${count}" -eq 1 ]]; then
-    printf '%s\n' "$(printf '%s\n' "${mounts[0]}" | awk '{ print $1 }')"
+    printf '%s\n' "${mounts[0]}"
     return 0
   fi
 
@@ -99,7 +118,7 @@ select_mount() {
   while true; do
     read -r -p "Select USB mount number: " choice
     if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= count )); then
-      printf '%s\n' "$(printf '%s\n' "${mounts[$((choice - 1))]}" | awk '{ print $1 }')"
+      printf '%s\n' "${mounts[$((choice - 1))]}"
       return 0
     fi
     echo "Invalid selection."
