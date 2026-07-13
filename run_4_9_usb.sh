@@ -21,6 +21,9 @@ run_dd() {
   local output rate
 
   echo "=== ${label} ==="
+  printf 'Command:'
+  printf ' %q' "$@"
+  echo
   output="$("$@" 2>&1)"
   echo "${output}"
   rate="$(printf '%s\n' "${output}" | extract_rate)"
@@ -90,15 +93,21 @@ print_test_summary() {
   local device="$1"
   local mount_path="$2"
   local status="$3"
+  local green reset
 
+  green="$(printf '\033[32m')"
+  reset="$(printf '\033[0m')"
+
+  printf '%s' "${green}"
   echo "======================================"
-  echo "7.4 USB Storage Test Result"
+  echo "4.9 USB Storage Test Result"
   echo "Device: ${device:-N/A}"
   echo "Mount:  ${mount_path}"
   echo "Write:  ${WRITE_RATE:-N/A}"
   echo "Read:   ${READ_RATE:-N/A}"
   echo "Status: ${status}"
   echo "======================================"
+  printf '%s' "${reset}"
 }
 
 select_mount() {
@@ -172,6 +181,10 @@ run_usb_test_once() {
   echo
 
   run_dd "Read" sudo dd "if=${test_file}" of=/dev/null "bs=${BLOCK_SIZE}"
+  echo "Removing test file: ${test_file}"
+  rm -f -- "${test_file}"
+  echo
+
   unmount_usb_mount "${mount_path}"
   print_test_summary "${device}" "${mount_path}" "PASS"
 }
