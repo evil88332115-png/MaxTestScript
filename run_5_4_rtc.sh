@@ -16,9 +16,11 @@ fi
 show_status() {
   local rtc_text
 
+  echo "Command: sudo hwclock --show --utc"
   rtc_text="$(sudo hwclock --show --utc 2>&1 || true)"
   echo
   echo "System time:"
+  echo "Command: date"
   date
   echo
   echo "RTC read by hwclock (--utc; formatted in current local timezone):"
@@ -33,7 +35,14 @@ show_status() {
   fi
   echo
   echo "timedatectl:"
+  echo "Command: timedatectl status"
   timedatectl status 2>&1 || true
+}
+
+print_command() {
+  printf 'Command:'
+  printf ' %q' "$@"
+  printf '\n'
 }
 
 set_system_time() {
@@ -62,7 +71,9 @@ set_system_time() {
   esac
 
   echo "Disabling automatic NTP before manual time setting..."
+  echo "Command: sudo timedatectl set-ntp false"
   sudo timedatectl set-ntp false
+  print_command sudo date -s "${value}"
   sudo date -s "${value}"
   echo "Updated system time: $(date --iso-8601=seconds)"
 }
@@ -80,6 +91,7 @@ set_timezone() {
   fi
 
   echo "Current timezone: $(timedatectl show -p Timezone --value 2>/dev/null)"
+  print_command sudo timedatectl set-timezone "${timezone}"
   output="$(sudo timedatectl set-timezone "${timezone}" 2>&1)"
   rc="$?"
   actual_timezone="$(timedatectl show -p Timezone --value 2>/dev/null)"
@@ -90,7 +102,9 @@ set_timezone() {
     "${persistent_target}" != "/usr/share/zoneinfo/${timezone}" ]]; then
     printf '%sTimezone was not persisted by timedatectl; applying file fallback.%s\n' \
       "${YELLOW}" "${RESET}"
+    print_command sudo ln -snf "/usr/share/zoneinfo/${timezone}" /etc/localtime
     sudo ln -snf "/usr/share/zoneinfo/${timezone}" /etc/localtime
+    print_command sudo tee /etc/timezone
     printf '%s\n' "${timezone}" | sudo tee /etc/timezone >/dev/null
     actual_timezone="$(timedatectl show -p Timezone --value 2>/dev/null)"
     persistent_timezone="$(cat /etc/timezone 2>/dev/null || true)"
@@ -114,6 +128,7 @@ set_timezone() {
     return 1
   fi
 
+  echo "Command: timedatectl status"
   timedatectl status
 }
 
@@ -135,6 +150,7 @@ write_rtc() {
   esac
 
   echo "Writing current system time to RTC using UTC mode..."
+  echo "Command: sudo hwclock --systohc --utc"
   sudo hwclock --systohc --utc
   echo "Updated RTC time: $(sudo hwclock --show --utc 2>&1)"
   printf '%sRTC write completed.%s\n' "${GREEN}" "${RESET}"
@@ -144,6 +160,7 @@ compare_clocks() {
   local system_epoch rtc_text rtc_epoch difference
 
   system_epoch="$(date +%s)"
+  echo "Command: sudo hwclock --show --utc"
   rtc_text="$(sudo hwclock --show --utc 2>/dev/null || true)"
   rtc_epoch="$(date -d "${rtc_text}" +%s 2>/dev/null || true)"
 
@@ -178,7 +195,10 @@ schedule_absolute_shutdown() {
 
   read -r -p "Schedule shutdown at ${value}? [y/N] " confirm
   case "${confirm}" in
-    y|Y|yes|YES) sudo shutdown -h "${value}" ;;
+    y|Y|yes|YES)
+      print_command sudo shutdown -h "${value}"
+      sudo shutdown -h "${value}"
+      ;;
     *) echo "Cancelled." ;;
   esac
 }
@@ -195,7 +215,10 @@ schedule_relative_shutdown() {
 
   read -r -p "Schedule shutdown after ${minutes} minute(s)? [y/N] " confirm
   case "${confirm}" in
-    y|Y|yes|YES) sudo shutdown -h "+${minutes}" ;;
+    y|Y|yes|YES)
+      print_command sudo shutdown -h "+${minutes}"
+      sudo shutdown -h "+${minutes}"
+      ;;
     *) echo "Cancelled." ;;
   esac
 }
@@ -225,6 +248,7 @@ while true; do
     6) schedule_absolute_shutdown ;;
     7) schedule_relative_shutdown ;;
     8)
+      echo "Command: sudo shutdown -c"
       sudo shutdown -c
       printf '%sScheduled shutdown cancelled.%s\n' "${GREEN}" "${RESET}"
       ;;
