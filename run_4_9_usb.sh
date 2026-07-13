@@ -4,6 +4,8 @@ set -euo pipefail
 TEST_FILE_NAME="${TEST_FILE_NAME:-test.bin}"
 BLOCK_SIZE="${BLOCK_SIZE:-1024K}"
 COUNT="${COUNT:-1024}"
+WRITE_RATE=""
+READ_RATE=""
 
 extract_rate() {
   awk -F, '/copied/ {
@@ -24,6 +26,10 @@ run_dd() {
   rate="$(printf '%s\n' "${output}" | extract_rate)"
   if [[ -n "${rate}" ]]; then
     printf 'RESULT,%s,%s\n' "${label}" "${rate}"
+    case "${label}" in
+      Write) WRITE_RATE="${rate}" ;;
+      Read) READ_RATE="${rate}" ;;
+    esac
   else
     printf 'RESULT,%s,Unable to parse rate\n' "${label}"
   fi
@@ -80,6 +86,21 @@ print_mount_detail() {
   fi
 }
 
+print_test_summary() {
+  local device="$1"
+  local mount_path="$2"
+  local status="$3"
+
+  echo "======================================"
+  echo "7.4 USB Storage Test Result"
+  echo "Device: ${device:-N/A}"
+  echo "Mount:  ${mount_path}"
+  echo "Write:  ${WRITE_RATE:-N/A}"
+  echo "Read:   ${READ_RATE:-N/A}"
+  echo "Status: ${status}"
+  echo "======================================"
+}
+
 select_mount() {
   local mounts count choice
   mapfile -t mounts < <(find_usb_mounts)
@@ -126,11 +147,17 @@ select_mount() {
 }
 
 run_usb_test_once() {
-  local mount_path test_file
+  local mount_path test_file device
   mount_path="$(select_mount)"
   test_file="${mount_path%/}/${TEST_FILE_NAME}"
+  device="$(findmnt -rn -o SOURCE --mountpoint "${mount_path}" 2>/dev/null | head -n 1 || true)"
+  WRITE_RATE=""
+  READ_RATE=""
 
   echo "Selected USB mount: ${mount_path}"
+  if [[ -n "${device}" ]]; then
+    echo "Selected USB device: ${device}"
+  fi
   echo "Test file: ${test_file}"
   echo "Block size: ${BLOCK_SIZE}"
   echo "Count: ${COUNT}"
@@ -146,6 +173,7 @@ run_usb_test_once() {
 
   run_dd "Read" sudo dd "if=${test_file}" of=/dev/null "bs=${BLOCK_SIZE}"
   unmount_usb_mount "${mount_path}"
+  print_test_summary "${device}" "${mount_path}" "PASS"
 }
 
 echo "4.9 USB Storage dd test"
@@ -158,22 +186,4 @@ echo "Requesting sudo permission for dd and drop_caches..."
 sudo -v
 echo
 
-while true; do
-  run_usb_test_once
-  echo "Please move the USB storage device to the next USB port, wait until it is mounted, then continue here."
-  echo
-
-  if [[ ! -t 0 ]]; then
-    break
-  fi
-
-  read -r -p "Do you have another USB port to test? [y/N] " answer
-  case "${answer}" in
-    y|Y|yes|YES) echo; continue ;;
-    *) break ;;
-  esac
-done
-
-echo "Summary"
-echo "-------"
-echo "Review the RESULT lines for USB mount path and write/read throughput."
+run_usb_test_once
