@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MEDIA_DIR="${MEDIA_DIR:-/mnt/nas_home/TEST FILE/FPS}"
+NAS_TEST_FILE_DIR="${NAS_TEST_FILE_DIR:-/mnt/nas_home/TEST FILE}"
+MEDIA_DIR="${MEDIA_DIR:-}"
 LOCAL_MEDIA_DIR="${LOCAL_MEDIA_DIR:-${HOME}/5_7_fps_media}"
 LOG_DIR="${LOG_DIR:-/tmp/fps_5_7_logs}"
 DURATION="${DURATION:-}"
@@ -15,6 +16,7 @@ VIDEO_SYNC="${VIDEO_SYNC:-false}"
 AUDIO_SINK="${AUDIO_SINK:-autoaudiosink}"
 INDEXES="${INDEXES:-}"
 SOURCE_MODE="${SOURCE_MODE:-}"
+FPS_FOLDER="${FPS_FOLDER:-}"
 export DISPLAY="${DISPLAY:-:0}"
 
 if [[ -t 1 ]]; then
@@ -284,6 +286,38 @@ get_display_hz() {
   ')"
 
   printf '%s\n' "${hz:-60}"
+}
+
+get_display_size() {
+  local geometry
+
+  geometry="$(xrandr --current 2>/dev/null | awk '
+    / connected primary/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^[0-9]+x[0-9]+\+/) {
+          split($i, position, "+")
+          print position[1]
+          exit
+        }
+      }
+    }
+    / connected/ && !found {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^[0-9]+x[0-9]+\+/) {
+          split($i, position, "+")
+          print position[1]
+          found = 1
+          exit
+        }
+      }
+    }
+  ')"
+
+  if [[ "${geometry}" =~ ^[0-9]+x[0-9]+$ ]]; then
+    printf '%s\n' "${geometry}"
+  else
+    printf '0x0\n'
+  fi
 }
 
 fps_to_decimal() {
@@ -575,6 +609,7 @@ run_hwdecode_playback() {
   local file="$1"
   local log="$2"
   local info codec format parser demux audio_codec sink decoder audio_sink
+  local display_size display_width display_height video_sink
   local -a launch_prefix gst_cmd
 
   info="$(probe_video_info "${file}")"
@@ -583,7 +618,15 @@ run_hwdecode_playback() {
   format="$(ffprobe -v error -show_entries format=format_name -of default=noprint_wrappers=1:nokey=1 "${file}" 2>/dev/null | head -n 1 || true)"
   parser="$(get_parser "${codec}")"
   demux="$(get_demux "${file}" "${format}")"
-  sink="fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true"
+  display_size="$(get_display_size)"
+  display_width="${display_size%x*}"
+  display_height="${display_size#*x}"
+  if [[ "${display_width}" =~ ^[1-9][0-9]*$ && "${display_height}" =~ ^[1-9][0-9]*$ ]]; then
+    video_sink="nv3dsink window-x=0 window-y=0 window-width=${display_width} window-height=${display_height} sync=true"
+  else
+    video_sink="nv3dsink sync=true"
+  fi
+  sink="fpsdisplaysink video-sink=${video_sink} text-overlay=false silent=false sync=true"
   decoder="nvv4l2decoder"
   audio_sink="${AUDIO_SINK}"
   launch_prefix=()
@@ -593,6 +636,7 @@ run_hwdecode_playback() {
 
   echo "Mode: hwdecode"
   echo "Pipeline target: ${demux} -> ${parser} -> ${decoder} -> nvvidconv -> ${sink}"
+  echo "Display window: ${display_size}"
   if [[ -n "${audio_codec}" ]] && audio_supported_for_demux "${demux}"; then
     echo "Audio target: ${audio_codec} -> decodebin -> ${audio_sink}"
   else
@@ -609,7 +653,7 @@ run_hwdecode_playback() {
       "${launch_prefix[@]}" "${GST_LAUNCH}" -e -v
       filesrc "location=${file}" !
       "${parser}" ! "${decoder}" ! nvvidconv !
-      fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true
+      fpsdisplaysink "video-sink=${video_sink}" text-overlay=false silent=false sync=true
     )
     run_gst_with_terminal_fps "${log}" "${gst_cmd[@]}"
     return "$?"
@@ -622,7 +666,7 @@ run_hwdecode_playback() {
       "${demux}" name=demux
       demux. ! queue !
       "${parser}" ! "${decoder}" ! nvvidconv !
-      fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true
+      fpsdisplaysink "video-sink=${video_sink}" text-overlay=false silent=false sync=true
     )
     run_gst_with_terminal_fps "${log}" "${gst_cmd[@]}"
     return "$?"
@@ -635,7 +679,7 @@ run_hwdecode_playback() {
       "${demux}" name=demux
       demux.video_0 ! queue !
       "${parser}" ! "${decoder}" ! nvvidconv !
-      fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true
+      fpsdisplaysink "video-sink=${video_sink}" text-overlay=false silent=false sync=true
       demux.audio_0 ! queue !
       decodebin ! audioconvert ! audioresample !
       "${audio_sink}"
@@ -650,7 +694,7 @@ run_hwdecode_playback() {
     "${demux}" name=demux
     demux.video_0 ! queue !
     "${parser}" ! "${decoder}" ! nvvidconv !
-    fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true
+    fpsdisplaysink "video-sink=${video_sink}" text-overlay=false silent=false sync=true
   )
   run_gst_with_terminal_fps "${log}" "${gst_cmd[@]}"
 }
@@ -706,7 +750,7 @@ select_source_mode() {
 
   echo "Playback source mode:"
   echo "1) Copy selected NAS videos to local and play local files (recommended)"
-  echo "2) Direct NAS streaming from ${MEDIA_DIR}"
+  echo "2) Direct NAS streaming from selected FPS folder"
   read -r -p "Select [1/2, default 1]: " choice
 
   case "${choice}" in
@@ -717,6 +761,61 @@ select_source_mode() {
       SOURCE_MODE="local"
       ;;
   esac
+}
+
+select_fps_folder() {
+  local choice
+
+  if [[ -n "${MEDIA_DIR}" ]]; then
+    echo "FPS media directory preset by MEDIA_DIR: ${MEDIA_DIR}"
+    return 0
+  fi
+
+  if [[ -n "${FPS_FOLDER}" ]]; then
+    case "${FPS_FOLDER}" in
+      FPS-30|FPS-60)
+        MEDIA_DIR="${NAS_TEST_FILE_DIR}/${FPS_FOLDER}"
+        return 0
+        ;;
+      30)
+        FPS_FOLDER="FPS-30"
+        MEDIA_DIR="${NAS_TEST_FILE_DIR}/${FPS_FOLDER}"
+        return 0
+        ;;
+      60)
+        FPS_FOLDER="FPS-60"
+        MEDIA_DIR="${NAS_TEST_FILE_DIR}/${FPS_FOLDER}"
+        return 0
+        ;;
+      *)
+        echo "ERROR: unsupported FPS_FOLDER=${FPS_FOLDER}. Use FPS-30, FPS-60, 30, or 60." >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  if [[ ! -t 0 ]]; then
+    FPS_FOLDER="FPS-60"
+    MEDIA_DIR="${NAS_TEST_FILE_DIR}/${FPS_FOLDER}"
+    echo "Non-interactive shell; defaulting FPS folder to ${FPS_FOLDER}."
+    return 0
+  fi
+
+  echo "FPS source folder:"
+  echo "1) FPS-60 (${NAS_TEST_FILE_DIR}/FPS-60)"
+  echo "2) FPS-30 (${NAS_TEST_FILE_DIR}/FPS-30)"
+  read -r -p "Select [1/2, default 1]: " choice
+
+  case "${choice}" in
+    2)
+      FPS_FOLDER="FPS-30"
+      ;;
+    *)
+      FPS_FOLDER="FPS-60"
+      ;;
+  esac
+
+  MEDIA_DIR="${NAS_TEST_FILE_DIR}/${FPS_FOLDER}"
 }
 
 prepare_playback_files() {
@@ -758,13 +857,21 @@ echo "5.7 FPS test"
 echo "Host: $(hostname)"
 echo "Date: $(date --iso-8601=seconds)"
 echo "Mode: ${MODE}"
-echo "Media directory: ${MEDIA_DIR}"
+echo "NAS test file directory: ${NAS_TEST_FILE_DIR}"
+echo "Media directory: ${MEDIA_DIR:-not selected}"
 echo "Local media directory: ${LOCAL_MEDIA_DIR}"
 echo "Log directory: ${LOG_DIR}"
 echo "Duration per file: ${DURATION}"
 setup_display
 echo "DISPLAY: ${DISPLAY:-not set}"
 echo "XAUTHORITY: ${XAUTHORITY:-not set}"
+echo
+
+select_source_mode
+select_fps_folder
+
+echo "Selected FPS folder: ${FPS_FOLDER:-custom}"
+echo "Media directory: ${MEDIA_DIR}"
 echo
 
 if [[ ! -d "${MEDIA_DIR}" ]]; then
@@ -805,10 +912,10 @@ if [[ "${#NAS_FILES[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-select_source_mode
 prepare_playback_files
 
 echo "Source mode: ${SOURCE_MODE}"
+echo "FPS folder: ${FPS_FOLDER:-custom}"
 echo "Playback files: ${#FILES[@]}"
 echo
 
@@ -825,6 +932,7 @@ done
   echo "Media directory: ${MEDIA_DIR}"
   echo "Local media directory: ${LOCAL_MEDIA_DIR}"
   echo "Source mode: ${SOURCE_MODE}"
+  echo "FPS folder: ${FPS_FOLDER:-custom}"
   echo "Duration per file: ${DURATION}"
   echo "Video sink: fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true"
   echo "Player: gst-launch-1.0 hardware decode"
