@@ -58,6 +58,12 @@ find_player() {
   exit 1
 }
 
+print_command() {
+  printf 'Command:'
+  printf ' %q' "$@"
+  echo
+}
+
 select_source_mode() {
   local choice
 
@@ -126,6 +132,7 @@ prepare_playback_files() {
 play_file() {
   local file="$1"
   local duration duration_text start_ts now elapsed elapsed_text rc log_file player_pid key action
+  local -a command
 
   echo "=== Playing $(basename "${file}") ==="
   duration="$(get_duration_seconds "${file}")"
@@ -136,19 +143,21 @@ play_file() {
   log_file="$(mktemp /tmp/4_21_audio_decode_XXXXXX.log)"
   case "${PLAYER}" in
     ffplay)
-      ffplay -nodisp -autoexit -hide_banner -loglevel warning "${file}" >"${log_file}" 2>&1 </dev/null &
+      command=(ffplay -nodisp -autoexit -hide_banner -loglevel warning "${file}")
       ;;
     gst-play-1.0)
-      gst-play-1.0 "${file}" >"${log_file}" 2>&1 </dev/null &
+      command=(gst-play-1.0 "${file}")
       ;;
     cvlc)
-      cvlc --play-and-exit "${file}" >"${log_file}" 2>&1 </dev/null &
+      command=(cvlc --play-and-exit "${file}")
       ;;
     *)
       echo "ERROR: Unsupported player: ${PLAYER}" >&2
       exit 1
       ;;
   esac
+  print_command "${command[@]}"
+  "${command[@]}" >"${log_file}" 2>&1 </dev/null &
   player_pid=$!
   start_ts="$(date +%s)"
   action="complete"

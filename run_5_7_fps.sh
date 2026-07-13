@@ -179,6 +179,32 @@ print(f"{len(values)},{avg:.2f},{min(values):.2f},{max(values):.2f}")
 PY
 }
 
+print_command_array() {
+  printf 'Command:'
+  printf ' %q' "$@"
+  printf '\n'
+}
+
+run_gst_with_terminal_fps() {
+  local log="$1"
+  shift
+  local rc
+
+  print_command_array "$@"
+  set +o pipefail
+  "$@" 2>&1 \
+    | tee "${log}" \
+    | grep --line-buffered "last-message = rendered:" \
+    | sed -u 's/.*last-message = //' \
+    | while IFS= read -r line; do
+        printf '\r%s' "${line}"
+      done
+  rc="${PIPESTATUS[0]}"
+  set -o pipefail
+  printf '\n'
+  return "${rc}"
+}
+
 have_gi() {
   python3 - <<'PY' >/dev/null 2>&1
 import gi
@@ -549,7 +575,7 @@ run_hwdecode_playback() {
   local file="$1"
   local log="$2"
   local info codec format parser demux audio_codec sink decoder audio_sink
-  local -a launch_prefix
+  local -a launch_prefix gst_cmd
 
   info="$(probe_video_info "${file}")"
   codec="$(printf '%s\n' "${info}" | awk -F= '$1=="codec_name" { print $2; exit }')"
@@ -557,7 +583,7 @@ run_hwdecode_playback() {
   format="$(ffprobe -v error -show_entries format=format_name -of default=noprint_wrappers=1:nokey=1 "${file}" 2>/dev/null | head -n 1 || true)"
   parser="$(get_parser "${codec}")"
   demux="$(get_demux "${file}" "${format}")"
-  sink="nv3dsink sync=true"
+  sink="fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true"
   decoder="nvv4l2decoder"
   audio_sink="${AUDIO_SINK}"
   launch_prefix=()
@@ -579,49 +605,54 @@ run_hwdecode_playback() {
   fi
 
   if [[ "${demux}" == "raw" ]]; then
-    printf 'Command: %q -e filesrc location=%q ! %s ! %s ! nvvidconv ! %s\n' \
-      "${GST_LAUNCH}" "${file}" "${parser}" "${decoder}" "${sink}"
-    "${launch_prefix[@]}" "${GST_LAUNCH}" -e \
-      filesrc location="${file}" ! \
-      ${parser} ! ${decoder} ! nvvidconv ! \
-      ${sink} >"${log}" 2>&1
-    return $?
+    gst_cmd=(
+      "${launch_prefix[@]}" "${GST_LAUNCH}" -e -v
+      filesrc "location=${file}" !
+      "${parser}" ! "${decoder}" ! nvvidconv !
+      fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true
+    )
+    run_gst_with_terminal_fps "${log}" "${gst_cmd[@]}"
+    return "$?"
   fi
 
   if [[ "${demux}" == "tsdemux" || "${demux}" == "mpegpsdemux" || "${demux}" == "avidemux" ]]; then
-    printf 'Command: %q -e filesrc location=%q ! %s name=demux demux. ! queue ! %s ! %s ! nvvidconv ! %s\n' \
-      "${GST_LAUNCH}" "${file}" "${demux}" "${parser}" "${decoder}" "${sink}"
-    "${launch_prefix[@]}" "${GST_LAUNCH}" -e \
-      filesrc location="${file}" ! \
-      ${demux} name=demux \
-      demux. ! queue ! \
-      ${parser} ! ${decoder} ! nvvidconv ! \
-      ${sink} >"${log}" 2>&1
-    return $?
+    gst_cmd=(
+      "${launch_prefix[@]}" "${GST_LAUNCH}" -e -v
+      filesrc "location=${file}" !
+      "${demux}" name=demux
+      demux. ! queue !
+      "${parser}" ! "${decoder}" ! nvvidconv !
+      fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true
+    )
+    run_gst_with_terminal_fps "${log}" "${gst_cmd[@]}"
+    return "$?"
   fi
 
   if [[ -n "${audio_codec}" ]] && audio_supported_for_demux "${demux}"; then
-    printf 'Command: %q -e filesrc location=%q ! %s name=demux demux.video_0 ! queue ! %s ! %s ! nvvidconv ! %s demux.audio_0 ! queue ! decodebin ! audioconvert ! audioresample ! %s\n' \
-      "${GST_LAUNCH}" "${file}" "${demux}" "${parser}" "${decoder}" "${sink}" "${audio_sink}"
-    "${launch_prefix[@]}" "${GST_LAUNCH}" -e \
-      filesrc location="${file}" ! \
-      ${demux} name=demux \
-      demux.video_0 ! queue ! \
-      ${parser} ! ${decoder} ! nvvidconv ! \
-      ${sink} \
-      demux.audio_0 ! queue ! \
-      decodebin ! audioconvert ! audioresample ! \
-      ${audio_sink} >"${log}" 2>&1
-    return $?
+    gst_cmd=(
+      "${launch_prefix[@]}" "${GST_LAUNCH}" -e -v
+      filesrc "location=${file}" !
+      "${demux}" name=demux
+      demux.video_0 ! queue !
+      "${parser}" ! "${decoder}" ! nvvidconv !
+      fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true
+      demux.audio_0 ! queue !
+      decodebin ! audioconvert ! audioresample !
+      "${audio_sink}"
+    )
+    run_gst_with_terminal_fps "${log}" "${gst_cmd[@]}"
+    return "$?"
   fi
 
-  printf 'Command: %q -e filesrc location=%q ! %s name=demux demux.video_0 ! queue ! %s ! %s ! nvvidconv ! %s\n' \
-    "${GST_LAUNCH}" "${file}" "${demux}" "${parser}" "${decoder}" "${sink}"
-  "${launch_prefix[@]}" "${GST_LAUNCH}" -e \
-    filesrc location="${file}" ! \
-    ${demux} name=demux demux.video_0 ! queue ! \
-    ${parser} ! ${decoder} ! nvvidconv ! \
-    ${sink} >"${log}" 2>&1
+  gst_cmd=(
+    "${launch_prefix[@]}" "${GST_LAUNCH}" -e -v
+    filesrc "location=${file}" !
+    "${demux}" name=demux
+    demux.video_0 ! queue !
+    "${parser}" ! "${decoder}" ! nvvidconv !
+    fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true
+  )
+  run_gst_with_terminal_fps "${log}" "${gst_cmd[@]}"
 }
 
 find_files_by_indexes() {
@@ -758,7 +789,7 @@ SUMMARY_TXT="${LOG_DIR}/summary.txt"
 
 echo "file,status,exit_code,samples,avg_fps,min_fps,max_fps,codec,width,height,source_fps,log" >"${SUMMARY_CSV}"
 echo "Player: $(command -v "${GST_LAUNCH}")"
-echo "Pipeline: parser -> nvv4l2decoder -> nvvidconv -> nv3dsink sync=true"
+echo "Pipeline: parser -> nvv4l2decoder -> nvvidconv -> fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true"
 echo "Audio sink: ${AUDIO_SINK} (used only when the source file has an audio track)"
 echo "Playback: full file, then automatically continue"
 echo
@@ -795,7 +826,7 @@ done
   echo "Local media directory: ${LOCAL_MEDIA_DIR}"
   echo "Source mode: ${SOURCE_MODE}"
   echo "Duration per file: ${DURATION}"
-  echo "Video sink: nv3dsink sync=true"
+  echo "Video sink: fpsdisplaysink video-sink=nv3dsink text-overlay=false silent=false sync=true"
   echo "Player: gst-launch-1.0 hardware decode"
   echo "Files: ${#FILES[@]}"
   echo "CSV: ${SUMMARY_CSV}"

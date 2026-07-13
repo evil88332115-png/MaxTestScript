@@ -263,6 +263,8 @@ switch_resolution() {
   echo "Switching ${output} to ${resolution}"
   echo "Command: xrandr --display ${DISPLAY} --output ${output} --mode ${resolution} --scale 1x1"
   xrandr --display "$DISPLAY" --output "$output" --mode "$resolution" --scale 1x1
+  echo "Command: gsettings set ${GNOME_INTERFACE_SCHEMA} scaling-factor 1"
+  echo "Command: gsettings set ${GNOME_INTERFACE_SCHEMA} text-scaling-factor 1.0"
   force_100_percent_scaling
 }
 
