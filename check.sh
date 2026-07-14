@@ -1,100 +1,112 @@
 #!/usr/bin/env bash
-# check_jetson_stack.sh (v2)
-# 顯示 OS / JetPack / CUDA / cuDNN / TensorRT / OpenGL / GLES / Vulkan 版本
-# 失敗時不會中止，而是顯示 N/A + 原因
 
-set -u  # 不用 set -e，避免中途退出
-set -o pipefail
+set -u
 
-have_cmd() { command -v "$1" >/dev/null 2>&1; }
+have_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
 
-echo "==== System / Jetson Stack Info ===="
+print_item() {
+    printf '• %s: %s\n' "$1" "$2"
+}
 
-# --- OS ---
-OS_NAME="$(lsb_release -ds 2>/dev/null || grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '"')"
-echo "Operating System: ${OS_NAME:-Unknown}"
+print_command() {
+    printf 'Command: %s\n' "$1"
+}
 
-# --- JetPack (nvidia-jetpack meta package) ---
-if dpkg-query -W nvidia-jetpack >/dev/null 2>&1; then
-    JP_VER=$(dpkg-query -W -f='${Version}\n' nvidia-jetpack)
-    echo "JetPack SDK version: ${JP_VER}"
-else
-    if [[ -f /etc/nv_tegra_release ]]; then
-        L4T_INFO=$(sed 's/^# //;s/, */ , /g' /etc/nv_tegra_release)
-        echo "JetPack SDK version: (nvidia-jetpack pkg not found)"
-        echo "  L4T info: ${L4T_INFO}"
-    else
-        echo "JetPack SDK version: N/A (nvidia-jetpack pkg not found)"
+ensure_mesa_utils() {
+    if have_cmd glxinfo; then
+        return 0
     fi
-fi
 
-# --- CUDA ---
-if have_cmd nvcc; then
-    CUDA_VER=$(nvcc --version 2>/dev/null | awk '/release/{print $6}' | tr -d ',')
-    echo "CUDA Toolkit version: ${CUDA_VER:-Unknown}"
+    echo "glxinfo not found. Installing mesa-utils..."
+    sudo apt-get install -y mesa-utils
+}
+
+export DISPLAY=:0
+ensure_mesa_utils
+
+echo "Commands:"
+print_command "lsb_release -ds"
+print_command "dpkg -s nvidia-jetpack"
+print_command "dpkg -s cuda-toolkit-12-6"
+print_command "dpkg -s libcudnn9-cuda-12"
+print_command "dpkg -s tensorrt"
+print_command "glxinfo"
+print_command "vulkaninfo"
+echo
+echo "Results:"
+
+# Operating System
+OS_NAME="$(lsb_release -ds 2>/dev/null || grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d= -f2- | tr -d '"')"
+print_item "Operating System" "${OS_NAME:-Unknown}"
+
+# JetPack SDK
+if dpkg -s nvidia-jetpack >/dev/null 2>&1; then
+    JP_VER="$(dpkg -s nvidia-jetpack 2>/dev/null | sed -n 's/^Version: //p' | head -n1)"
+elif [[ -f /etc/nv_tegra_release ]]; then
+    JP_VER="$(sed 's/^# //' /etc/nv_tegra_release | head -n1)"
+else
+    JP_VER="N/A"
+fi
+print_item "JetPack SDK version" "${JP_VER:-N/A}"
+
+# CUDA Toolkit
+CUDA_VER=""
+if dpkg -s cuda-toolkit-12-6 >/dev/null 2>&1; then
+    CUDA_VER="$(dpkg -s cuda-toolkit-12-6 2>/dev/null | sed -n 's/.*Locked at CUDA Toolkit version \([^ .]*\.[^ .]*\).*/\1/p' | head -n1)"
+    if [[ -z "${CUDA_VER}" ]]; then
+        CUDA_VER="$(dpkg-query -W -f='${Package}\n' cuda-toolkit-12-6 2>/dev/null | sed -n 's/^cuda-toolkit-\([0-9]\+\)-\([0-9]\+\)$/\1.\2/p')"
+    fi
+elif dpkg-query -W 'cuda-toolkit-*' >/dev/null 2>&1; then
+    CUDA_PKG="$(dpkg-query -W -f='${Package}\n' 'cuda-toolkit-*' 2>/dev/null | grep -E '^cuda-toolkit-[0-9]+-[0-9]+$' | head -n1)"
+    CUDA_VER="$(printf '%s\n' "${CUDA_PKG}" | sed -n 's/^cuda-toolkit-\([0-9]\+\)-\([0-9]\+\)$/\1.\2/p')"
 elif [[ -f /usr/local/cuda/version.json ]]; then
-    CUDA_VER=$(grep '"version"' /usr/local/cuda/version.json | head -n1 | sed 's/.*: *"//;s/".*//')
-    echo "CUDA Toolkit version: ${CUDA_VER}"
-else
-    echo "CUDA Toolkit version: N/A (nvcc not found)"
+    CUDA_VER="$(grep -m1 '"version"' /usr/local/cuda/version.json | sed 's/.*: *"//;s/".*//')"
+elif [[ -f /usr/local/cuda/version.txt ]]; then
+    CUDA_VER="$(sed -n 's/^CUDA Version //p' /usr/local/cuda/version.txt | head -n1)"
+elif have_cmd nvcc; then
+    CUDA_VER="$(nvcc --version 2>/dev/null | awk '/release/{print $6}' | tr -d ',')"
 fi
-
-# --- cuDNN ---
-if [[ -f /usr/include/cudnn_version.h ]]; then
-    CUDNN_MAJOR=$(grep -E '^#define CUDNN_MAJOR' /usr/include/cudnn_version.h | awk '{print $3}')
-    CUDNN_MINOR=$(grep -E '^#define CUDNN_MINOR' /usr/include/cudnn_version.h | awk '{print $3}')
-    CUDNN_PATCH=$(grep -E '^#define CUDNN_PATCHLEVEL' /usr/include/cudnn_version.h | awk '{print $3}')
-    echo "cuDNN version: ${CUDNN_MAJOR}.${CUDNN_MINOR}.${CUDNN_PATCH}"
-else
-    CUDNN_LINE=$(dpkg -l | awk '/libcudnn[0-9]+/{print $2" " $3; exit}')
-    if [[ -n "${CUDNN_LINE:-}" ]]; then
-        echo "cuDNN version (from dpkg): ${CUDNN_LINE}"
-    else
-        echo "cuDNN version: N/A (header or package not found)"
-    fi
+if [[ -n "${CUDA_VER}" && "${CUDA_VER}" != V* ]]; then
+    CUDA_VER="V${CUDA_VER}"
 fi
+print_item "CUDA Toolkit version" "${CUDA_VER:-N/A}"
 
-# --- TensorRT ---
-TRT_VER=""
-if dpkg-query -W tensorrt >/dev/null 2>&1; then
-    TRT_VER=$(dpkg-query -W -f='${Version}\n' tensorrt)
+# cuDNN
+if dpkg -s libcudnn9-cuda-12 >/dev/null 2>&1; then
+    CUDNN_VER="$(dpkg -s libcudnn9-cuda-12 2>/dev/null | sed -n 's/^Version: //p' | head -n1)"
+elif [[ -f /usr/include/cudnn_version.h ]]; then
+    CUDNN_MAJOR="$(awk '/^#define CUDNN_MAJOR/{print $3}' /usr/include/cudnn_version.h)"
+    CUDNN_MINOR="$(awk '/^#define CUDNN_MINOR/{print $3}' /usr/include/cudnn_version.h)"
+    CUDNN_PATCH="$(awk '/^#define CUDNN_PATCHLEVEL/{print $3}' /usr/include/cudnn_version.h)"
+    CUDNN_VER="${CUDNN_MAJOR}.${CUDNN_MINOR}.${CUDNN_PATCH}"
 else
-    TRT_VER=$(dpkg -l | awk '/libnvinfer[0-9]+/{print $2" " $3; exit}')
+    CUDNN_VER="$(dpkg-query -W -f='${Version}\n' 'libcudnn*' 2>/dev/null | head -n1)"
 fi
+print_item "cuDNN version" "${CUDNN_VER:-N/A}"
 
-if [[ -n "${TRT_VER:-}" ]]; then
-    echo "TensorRT version: ${TRT_VER}"
+# TensorRT
+if dpkg -s tensorrt >/dev/null 2>&1; then
+    TRT_VER="$(dpkg -s tensorrt 2>/dev/null | sed -n 's/^Version: //p' | head -n1)"
 else
-    echo "TensorRT version: N/A (tensorrt / libnvinfer pkg not found)"
+    TRT_VER="$(dpkg-query -W -f='${Version}\n' 'libnvinfer*' 2>/dev/null | head -n1)"
 fi
+print_item "TensorRT version" "${TRT_VER:-N/A}"
 
-# --- OpenGL ---
-if have_cmd glxinfo; then
-    # 嘗試用現在的 DISPLAY，失敗也不要讓腳本退出
-    if GLX_OUT=$(glxinfo 2>/dev/null); then
-        GL_VER=$(printf '%s\n' "$GLX_OUT" | awk -F': ' '/OpenGL version string/{print $2; exit}')
-        GLES_VER=$(printf '%s\n' "$GLX_OUT" | awk -F': ' '/OpenGL ES profile version string/{print $2; exit}')
-        echo "OpenGL version: ${GL_VER:-N/A (no version string found)}"
-        echo "OpenGL ES version: ${GLES_VER:-N/A (no ES profile version string found)}"
-    else
-        echo "OpenGL version: N/A (glxinfo failed，可能沒有圖形環境或 DISPLAY 未設定)"
-        echo "OpenGL ES version: N/A (glxinfo failed，可能沒有圖形環境或 DISPLAY 未設定)"
-    fi
-else
-    echo "OpenGL version: N/A (glxinfo not installed: sudo apt install -y mesa-utils)"
-    echo "OpenGL ES version: N/A (glxinfo not installed: sudo apt install -y mesa-utils)"
+# OpenGL / OpenGL ES
+GL_VER="N/A"
+GLES_VER="N/A"
+if have_cmd glxinfo && GLX_OUT="$(glxinfo 2>/dev/null)"; then
+    GL_VER="$(printf '%s\n' "$GLX_OUT" | awk -F': ' '/OpenGL version string/{print $2; exit}')"
+    GLES_VER="$(printf '%s\n' "$GLX_OUT" | awk -F': ' '/OpenGL ES profile version string/{print $2; exit}')"
 fi
+print_item "OpenGL version" "${GL_VER:-N/A}"
+print_item "OpenGL ES version" "${GLES_VER:-N/A}"
 
-# --- Vulkan ---
-if have_cmd vulkaninfo; then
-    if VK_OUT=$(vulkaninfo 2>/dev/null); then
-        VK_VER=$(printf '%s\n' "$VK_OUT" | awk -F'= ' '/apiVersion/{print $2; exit}')
-        echo "Vulkan version: ${VK_VER:-N/A (no apiVersion found)}"
-    else
-        echo "Vulkan version: N/A (vulkaninfo failed，可能沒有驅動或 DISPLAY 未設定)"
-    fi
-else
-    echo "Vulkan version: N/A (vulkaninfo not installed: sudo apt install -y vulkan-tools)"
+# Vulkan
+VK_VER="N/A"
+if have_cmd vulkaninfo && VK_OUT="$(vulkaninfo 2>/dev/null)"; then
+    VK_VER="$(printf '%s\n' "$VK_OUT" | awk -F'= ' '/apiVersion/{print $2; exit}')"
 fi
-
-echo "====================================="
+print_item "Vulkan version" "${VK_VER:-N/A}"
