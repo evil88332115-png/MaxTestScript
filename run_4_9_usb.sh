@@ -6,6 +6,8 @@ BLOCK_SIZE="${BLOCK_SIZE:-1024K}"
 COUNT="${COUNT:-1024}"
 WRITE_RATE=""
 READ_RATE=""
+WRITE_TIME=""
+READ_TIME=""
 
 extract_rate() {
   awk -F, '/copied/ {
@@ -15,10 +17,19 @@ extract_rate() {
   }'
 }
 
+extract_duration() {
+  awk -F, '/copied/ {
+    duration=$(NF-1)
+    sub(/^[[:space:]]+/, "", duration)
+    sub(/[[:space:]]+$/, "", duration)
+    print duration
+  }'
+}
+
 run_dd() {
   local label="$1"
   shift
-  local output rate
+  local output rate duration
 
   echo "=== ${label} ==="
   printf 'Command:'
@@ -27,11 +38,12 @@ run_dd() {
   output="$("$@" 2>&1)"
   echo "${output}"
   rate="$(printf '%s\n' "${output}" | extract_rate)"
-  if [[ -n "${rate}" ]]; then
+  duration="$(printf '%s\n' "${output}" | extract_duration)"
+  if [[ -n "${rate}" && -n "${duration}" ]]; then
     printf 'RESULT,%s,%s\n' "${label}" "${rate}"
     case "${label}" in
-      Write) WRITE_RATE="${rate}" ;;
-      Read) READ_RATE="${rate}" ;;
+      Write) WRITE_TIME="${duration}"; WRITE_RATE="${rate}" ;;
+      Read) READ_TIME="${duration}"; READ_RATE="${rate}" ;;
     esac
   else
     printf 'RESULT,%s,Unable to parse rate\n' "${label}"
@@ -103,8 +115,16 @@ print_test_summary() {
   echo "4.9 USB Storage Test Result"
   echo "Device: ${device:-N/A}"
   echo "Mount:  ${mount_path}"
-  echo "Write:  ${WRITE_RATE:-N/A}"
-  echo "Read:   ${READ_RATE:-N/A}"
+  if [[ -n "${WRITE_TIME}" && -n "${WRITE_RATE}" ]]; then
+    echo "Write:  ${WRITE_TIME}, ${WRITE_RATE}"
+  else
+    echo "Write:  N/A"
+  fi
+  if [[ -n "${READ_TIME}" && -n "${READ_RATE}" ]]; then
+    echo "Read:   ${READ_TIME}, ${READ_RATE}"
+  else
+    echo "Read:   N/A"
+  fi
   echo "Status: ${status}"
   echo "======================================"
   printf '%s' "${reset}"
@@ -162,6 +182,8 @@ run_usb_test_once() {
   device="$(findmnt -rn -o SOURCE --mountpoint "${mount_path}" 2>/dev/null | head -n 1 || true)"
   WRITE_RATE=""
   READ_RATE=""
+  WRITE_TIME=""
+  READ_TIME=""
 
   echo "Selected USB mount: ${mount_path}"
   if [[ -n "${device}" ]]; then
