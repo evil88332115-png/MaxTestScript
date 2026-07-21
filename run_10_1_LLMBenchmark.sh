@@ -141,7 +141,8 @@ install_docker_if_missing() {
   run_sudo apt-get update
   run_sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     nano nvidia-jetpack git curl jq python3 python3-matplotlib \
-    mono-runtime libgdiplus nvidia-container
+    mono-runtime libmono-system-drawing4.0-cil \
+    libmono-system-windows-forms4.0-cil libgdiplus nvidia-container
 
   if ! command -v docker >/dev/null 2>&1; then
     info "Docker is not installed; installing Docker Engine..."
