@@ -1,14 +1,16 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Windows.Forms;
 
 public class LLMChartGenerator : Form
 {
-    private readonly string[] models =
+    private static readonly string[] models =
     {
         "Llama 3.1 8B",
         "Llama 3.2 3B",
@@ -18,8 +20,8 @@ public class LLMChartGenerator : Form
         "SmolLM2"
     };
 
-    private readonly double[] defaultOfficial = { 19.14, 43.07, 21.75, 34.97, 38.10, 64.50 };
-    private readonly double[] defaultB442 = { 17.13, 35.42, 18.72, 33.12, 32.36, 60.19 };
+    private static readonly double[] defaultOfficial = { 19.14, 43.07, 21.75, 34.97, 38.10, 64.50 };
+    private static readonly double[] defaultB442 = { 17.13, 35.42, 18.72, 33.12, 32.36, 60.19 };
 
     private TextBox[] officialBoxes;
     private TextBox[] b442Boxes;
@@ -204,7 +206,13 @@ public class LLMChartGenerator : Form
                 if (dialog.ShowDialog(this) != DialogResult.OK)
                     return;
 
-                DrawChart(dialog.FileName, official, b442);
+                DrawChart(
+                    dialog.FileName,
+                    official,
+                    b442,
+                    titleBox.Text,
+                    officialLabelBox.Text,
+                    b442LabelBox.Text);
                 MessageBox.Show(this, "PNG saved:\n" + dialog.FileName, "Done", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
@@ -229,7 +237,13 @@ public class LLMChartGenerator : Form
         return values;
     }
 
-    private void DrawChart(string outputPath, double[] official, double[] b442)
+    private static void DrawChart(
+        string outputPath,
+        double[] official,
+        double[] dut,
+        string title,
+        string officialLabel,
+        string dutLabel)
     {
         int w = 1200;
         int h = 750;
@@ -257,7 +271,7 @@ public class LLMChartGenerator : Form
             double maxY = 75.0;
 
             using (var center = new StringFormat { Alignment = StringAlignment.Center })
-                g.DrawString(titleBox.Text, titleFont, textBrush, new RectangleF(0, 12, w, 30), center);
+                g.DrawString(title, titleFont, textBrush, new RectangleF(0, 12, w, 30), center);
 
             for (int v = 0; v <= maxY; v += 10)
             {
@@ -285,7 +299,7 @@ public class LLMChartGenerator : Form
             {
                 float cx = left + groupW * (i + 0.5f);
                 float h1 = (float)(official[i] / maxY * plotH);
-                float h2 = (float)(b442[i] / maxY * plotH);
+                float h2 = (float)(dut[i] / maxY * plotH);
                 float x1 = cx - barW;
                 float x2 = cx;
                 float y1 = top + plotH - h1;
@@ -308,12 +322,167 @@ public class LLMChartGenerator : Form
                 g.DrawRectangle(legendPen, legendX, legendY, legendW, legendH);
             }
             g.FillRectangle(officialBrush, legendX + 12, legendY + 13, 30, 12);
-            g.DrawString(officialLabelBox.Text, legendFont, textBrush, legendX + 50, legendY + 8);
+            g.DrawString(officialLabel, legendFont, textBrush, legendX + 50, legendY + 8);
             g.FillRectangle(b442Brush, legendX + 12, legendY + 35, 30, 12);
-            g.DrawString(b442LabelBox.Text, legendFont, textBrush, legendX + 50, legendY + 30);
+            g.DrawString(dutLabel, legendFont, textBrush, legendX + 50, legendY + 30);
 
-            Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
+            string outputDirectory = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(outputDirectory))
+                Directory.CreateDirectory(outputDirectory);
             bmp.Save(outputPath, ImageFormat.Png);
+        }
+    }
+
+    private static List<string> ParseCsvLine(string line)
+    {
+        var fields = new List<string>();
+        var field = new StringBuilder();
+        bool quoted = false;
+
+        for (int i = 0; i < line.Length; i++)
+        {
+            char ch = line[i];
+            if (ch == '"')
+            {
+                if (quoted && i + 1 < line.Length && line[i + 1] == '"')
+                {
+                    field.Append('"');
+                    i++;
+                }
+                else
+                {
+                    quoted = !quoted;
+                }
+            }
+            else if (ch == ',' && !quoted)
+            {
+                fields.Add(field.ToString().Trim());
+                field.Length = 0;
+            }
+            else
+            {
+                field.Append(ch);
+            }
+        }
+
+        fields.Add(field.ToString().Trim());
+        return fields;
+    }
+
+    private static int FindColumn(List<string> header, string name)
+    {
+        for (int i = 0; i < header.Count; i++)
+        {
+            if (string.Equals(header[i].Trim(), name, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+        return -1;
+    }
+
+    private static int MatchModelIndex(string model)
+    {
+        string value = model.ToLowerInvariant();
+        if (value.Contains("llama-3.1-8b")) return 0;
+        if (value.Contains("llama-3.2-3b")) return 1;
+        if (value.Contains("qwen2.5-7b")) return 2;
+        if (value.Contains("gemma-2-2b")) return 3;
+        if (value.Contains("phi-3.5-mini")) return 4;
+        if (value.Contains("smollm2-1.7b")) return 5;
+        return -1;
+    }
+
+    private static double[] ReadDutValues(string csvPath)
+    {
+        if (!File.Exists(csvPath))
+            throw new FileNotFoundException("MLC CSV not found", csvPath);
+
+        string[] lines = File.ReadAllLines(csvPath);
+        if (lines.Length < 2)
+            throw new Exception("MLC CSV has no benchmark rows: " + csvPath);
+
+        List<string> header = ParseCsvLine(lines[0]);
+        int modelColumn = FindColumn(header, "model");
+        int decodeRateColumn = FindColumn(header, "decode_rate");
+        if (modelColumn < 0 || decodeRateColumn < 0)
+            throw new Exception("MLC CSV must contain model and decode_rate columns.");
+
+        var values = new double?[models.Length];
+        for (int lineIndex = 1; lineIndex < lines.Length; lineIndex++)
+        {
+            if (string.IsNullOrWhiteSpace(lines[lineIndex]))
+                continue;
+
+            List<string> fields = ParseCsvLine(lines[lineIndex]);
+            if (modelColumn >= fields.Count || decodeRateColumn >= fields.Count)
+                continue;
+
+            int modelIndex = MatchModelIndex(fields[modelColumn]);
+            if (modelIndex < 0)
+                continue;
+
+            double parsed;
+            if (double.TryParse(fields[decodeRateColumn], NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
+                values[modelIndex] = parsed;
+        }
+
+        var missing = new List<string>();
+        var result = new double[models.Length];
+        for (int i = 0; i < models.Length; i++)
+        {
+            if (!values[i].HasValue)
+                missing.Add(models[i]);
+            else
+                result[i] = values[i].Value;
+        }
+
+        if (missing.Count > 0)
+            throw new Exception("MLC CSV is missing required model(s): " + string.Join(", ", missing.ToArray()));
+        return result;
+    }
+
+    private static string RequireOption(Dictionary<string, string> options, string name)
+    {
+        string value;
+        if (!options.TryGetValue(name, out value) || string.IsNullOrWhiteSpace(value))
+            throw new Exception("Missing required option: " + name);
+        return value;
+    }
+
+    private static int RunCommandLine(string[] args)
+    {
+        try
+        {
+            var options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (!args[i].StartsWith("--", StringComparison.Ordinal))
+                    throw new Exception("Unexpected argument: " + args[i]);
+                if (i + 1 >= args.Length)
+                    throw new Exception("Missing value for option: " + args[i]);
+                options[args[i]] = args[++i];
+            }
+
+            string csvPath = RequireOption(options, "--csv");
+            string outputPath = RequireOption(options, "--output");
+            string title = options.ContainsKey("--title")
+                ? options["--title"]
+                : "LLM Performance (Power Mode: MAXN_SUPER)";
+            string officialLabel = options.ContainsKey("--official-label")
+                ? options["--official-label"]
+                : "Jetson Orin Nano Super (Official)";
+            string dutLabel = RequireOption(options, "--dut-label");
+            double[] dutValues = ReadDutValues(csvPath);
+
+            DrawChart(outputPath, defaultOfficial, dutValues, title, officialLabel, dutLabel);
+            Console.WriteLine("PNG saved: " + outputPath);
+            for (int i = 0; i < models.Length; i++)
+                Console.WriteLine(models[i] + ": " + dutValues[i].ToString("0.00", CultureInfo.InvariantCulture));
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("ERROR: " + ex.Message);
+            return 1;
         }
     }
 
@@ -326,10 +495,14 @@ public class LLMChartGenerator : Form
     }
 
     [STAThread]
-    public static void Main()
+    public static int Main(string[] args)
     {
+        if (args.Length > 0)
+            return RunCommandLine(args);
+
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new LLMChartGenerator());
+        return 0;
     }
 }
