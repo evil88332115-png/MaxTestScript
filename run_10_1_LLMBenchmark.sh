@@ -25,6 +25,7 @@ DRAW_TEMP_SCRIPT="${DRAW_TEMP_SCRIPT:-${SCRIPT_DIR}/drawtempcurve_auto.py}"
 CHART_GENERATOR="${CHART_GENERATOR:-${SCRIPT_DIR}/LLMChartGenerator.exe}"
 MLC_CSV_SOURCE="${MLC_CSV_SOURCE:-}"
 SWAP_FILE="${SWAP_FILE:-/mnt/16GB.swap}"
+USE_DISK_SWAP="${USE_DISK_SWAP:-0}"
 TEGRATS_INTERVAL_MS="${TEGRATS_INTERVAL_MS:-1000}"
 
 TEGRATS_LOG="${OUTPUT_DIR}/tegrastats.log"
@@ -66,7 +67,10 @@ Usage: run_10_1_LLMBenchmark.sh [--prepare] [--status]
 
 Environment overrides:
   OUTPUT_DIR, JETSON_CONTAINERS_DIR, DRAW_TEMP_SCRIPT, CHART_GENERATOR,
-  MLC_CSV_SOURCE, DUT_NAME, SWAP_FILE, TEGRATS_INTERVAL_MS
+  MLC_CSV_SOURCE, DUT_NAME, USE_DISK_SWAP, SWAP_FILE, TEGRATS_INTERVAL_MS
+
+  USE_DISK_SWAP=0  Use NVIDIA zram (default).
+  USE_DISK_SWAP=1  Disable zram and create/use the 16 GB SWAP_FILE.
 EOF
 }
 
@@ -113,6 +117,17 @@ configure_headless() {
 }
 
 configure_swap() {
+  if [[ "$USE_DISK_SWAP" == "0" ]]; then
+    info "Using NVIDIA zram; disk swap file will not be created or mounted."
+    if service_exists nvzramconfig.service; then
+      run_sudo systemctl enable nvzramconfig.service
+      if ! swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
+        run_sudo systemctl start nvzramconfig.service
+      fi
+    fi
+    return
+  fi
+
   info "Configuring 16 GB swap: $SWAP_FILE"
   if service_exists nvzramconfig.service; then
     run_sudo systemctl disable nvzramconfig.service
@@ -205,10 +220,20 @@ verify_post_reboot() {
   docker info >/dev/null 2>&1 || die "Current user cannot use Docker. Confirm the reboot and docker group membership."
   command -v tegrastats >/dev/null 2>&1 || die "tegrastats is not installed. Re-run with --prepare."
 
-  if ! swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$SWAP_FILE"; then
-    warn "$SWAP_FILE is not active; attempting to enable it."
+  if [[ "$USE_DISK_SWAP" == "1" ]]; then
+    [[ -f "$SWAP_FILE" ]] || die "$SWAP_FILE is missing. Re-run with USE_DISK_SWAP=1 and --prepare to create it."
+    if ! swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$SWAP_FILE"; then
+      warn "$SWAP_FILE is not active; attempting to enable it."
+      ensure_sudo_auth
+      run_sudo swapon "$SWAP_FILE"
+    fi
+  elif ! swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
+    warn "No NVIDIA zram swap is active; attempting to start nvzramconfig."
     ensure_sudo_auth
-    run_sudo swapon "$SWAP_FILE"
+    run_sudo systemctl enable nvzramconfig.service
+    run_sudo systemctl start nvzramconfig.service
+    swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram' || \
+      die "NVIDIA zram did not become active."
   fi
 }
 
@@ -441,6 +466,9 @@ show_status() {
 }
 
 main() {
+  [[ "$USE_DISK_SWAP" == "0" || "$USE_DISK_SWAP" == "1" ]] || \
+    die "USE_DISK_SWAP must be 0 or 1."
+
   if ((STATUS_ONLY)); then
     show_status
     exit 0
