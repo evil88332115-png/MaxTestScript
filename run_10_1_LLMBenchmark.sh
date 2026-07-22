@@ -219,6 +219,7 @@ verify_post_reboot() {
   systemctl is-active --quiet docker.service || die "Docker service is not active."
   docker info >/dev/null 2>&1 || die "Current user cannot use Docker. Confirm the reboot and docker group membership."
   command -v tegrastats >/dev/null 2>&1 || die "tegrastats is not installed. Re-run with --prepare."
+  command -v jetson_clocks >/dev/null 2>&1 || die "jetson_clocks is not installed. Re-run with --prepare."
 
   if [[ "$USE_DISK_SWAP" == "1" ]]; then
     [[ -f "$SWAP_FILE" ]] || die "$SWAP_FILE is missing. Re-run with USE_DISK_SWAP=1 and --prepare to create it."
@@ -410,6 +411,9 @@ run_benchmark() {
 
   rm -f "$TEMP_PNG" "$MLC_CSV_DEST" "$PERFORMANCE_PNG"
   : > "$BENCHMARK_LOG"
+  info "Locking Jetson clocks before benchmark..."
+  ensure_sudo_auth
+  run_sudo jetson_clocks
   capture_mlc_start_position
   start_tegrastats
   trap 'stop_tegrastats' EXIT
