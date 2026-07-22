@@ -25,7 +25,7 @@ DRAW_TEMP_SCRIPT="${DRAW_TEMP_SCRIPT:-${SCRIPT_DIR}/drawtempcurve_auto.py}"
 CHART_GENERATOR="${CHART_GENERATOR:-${SCRIPT_DIR}/LLMChartGenerator.exe}"
 MLC_CSV_SOURCE="${MLC_CSV_SOURCE:-}"
 SWAP_FILE="${SWAP_FILE:-/mnt/16GB.swap}"
-USE_DISK_SWAP="${USE_DISK_SWAP:-0}"
+USE_DISK_SWAP="${USE_DISK_SWAP:-1}"
 TEGRATS_INTERVAL_MS="${TEGRATS_INTERVAL_MS:-1000}"
 
 TEGRATS_LOG="${OUTPUT_DIR}/tegrastats.log"
@@ -69,8 +69,8 @@ Environment overrides:
   OUTPUT_DIR, JETSON_CONTAINERS_DIR, DRAW_TEMP_SCRIPT, CHART_GENERATOR,
   MLC_CSV_SOURCE, DUT_NAME, USE_DISK_SWAP, SWAP_FILE, TEGRATS_INTERVAL_MS
 
-  USE_DISK_SWAP=0  Use NVIDIA zram (default).
-  USE_DISK_SWAP=1  Disable zram and create/use the 16 GB SWAP_FILE.
+  USE_DISK_SWAP=0  Use NVIDIA zram.
+  USE_DISK_SWAP=1  Disable zram and create/use the 16 GB SWAP_FILE (default).
 EOF
 }
 
@@ -161,7 +161,7 @@ configure_swap() {
 
   info "Configuring 16 GB swap: $SWAP_FILE"
   if service_exists nvzramconfig.service; then
-    run_sudo systemctl disable nvzramconfig.service
+    run_sudo systemctl disable --now nvzramconfig.service
   fi
 
   if [[ ! -f "$SWAP_FILE" ]]; then
@@ -212,6 +212,7 @@ install_docker_if_missing() {
   run_sudo mv /etc/docker/daemon.json.tmp /etc/docker/daemon.json
   run_sudo systemctl daemon-reload
   run_sudo systemctl restart docker.service
+  info "Adding user to Docker group: $TEST_USER"
   run_sudo usermod -aG docker "$TEST_USER"
 }
 
@@ -251,7 +252,6 @@ verify_post_reboot() {
   systemctl is-active --quiet docker.service || die "Docker service is not active."
   docker info >/dev/null 2>&1 || die "Current user cannot use Docker. Confirm the reboot and docker group membership."
   command -v tegrastats >/dev/null 2>&1 || die "tegrastats is not installed. Re-run with --prepare."
-  command -v jetson_clocks >/dev/null 2>&1 || die "jetson_clocks is not installed. Re-run with --prepare."
 
   if [[ "$USE_DISK_SWAP" == "1" ]]; then
     [[ -f "$SWAP_FILE" ]] || die "$SWAP_FILE is missing. Re-run with USE_DISK_SWAP=1 and --prepare to create it."
@@ -444,9 +444,6 @@ run_benchmark() {
   rm -f "$TEMP_PNG" "$MLC_CSV_DEST" "$PERFORMANCE_PNG"
   : > "$BENCHMARK_LOG"
   configure_maxn_super
-  info "Locking Jetson clocks before benchmark..."
-  ensure_sudo_auth
-  run_sudo jetson_clocks
   capture_mlc_start_position
   start_tegrastats
   trap 'stop_tegrastats' EXIT
