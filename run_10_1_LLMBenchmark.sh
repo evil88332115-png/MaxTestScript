@@ -104,6 +104,37 @@ ensure_sudo_auth() {
   [[ $EUID -eq 0 ]] || sudo -v
 }
 
+configure_maxn_super() {
+  local config="/etc/nvpmodel.conf" current_mode mode_id
+
+  [[ -r "$config" ]] || die "nvpmodel configuration is not readable: $config"
+  ensure_sudo_auth
+  if ! current_mode="$(run_sudo nvpmodel -q 2>&1)"; then
+    die "Unable to query the current nvpmodel power mode: $current_mode"
+  fi
+
+  if grep -Eq '^NV Power Mode:[[:space:]]*MAXN_SUPER[[:space:]]*$' <<< "$current_mode"; then
+    info "Power mode is already MAXN_SUPER."
+    return
+  fi
+
+  mode_id="$(
+    grep -E 'POWER_MODEL.*NAME=MAXN_SUPER([[:space:]>]|$)' "$config" \
+      | sed -n 's/.*ID=\([0-9][0-9]*\).*/\1/p' \
+      | sed -n '1p'
+  )"
+  [[ -n "$mode_id" ]] || die "MAXN_SUPER mode was not found in $config"
+
+  info "Switching power mode to MAXN_SUPER (mode ID $mode_id)..."
+  printf 'YES\n' | run_sudo nvpmodel -m "$mode_id"
+  if ! current_mode="$(run_sudo nvpmodel -q 2>&1)"; then
+    die "Unable to verify nvpmodel after switching: $current_mode"
+  fi
+  printf '%s\n' "$current_mode"
+  grep -Eq '^NV Power Mode:[[:space:]]*MAXN_SUPER[[:space:]]*$' <<< "$current_mode" || \
+    die "Power mode verification failed; expected MAXN_SUPER."
+}
+
 service_exists() {
   systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q .
 }
@@ -195,6 +226,7 @@ prepare_system() {
   boot_id="$(current_boot_id)"
   printf '%s\n' "$boot_id" > "$PREPARED_BOOT_FILE"
   sync
+  configure_maxn_super
 
   pass "RESULT,LLM_BENCHMARK,PREPARE,PASS"
   info "Preparation is complete. The system will reboot into headless mode."
@@ -411,6 +443,7 @@ run_benchmark() {
 
   rm -f "$TEMP_PNG" "$MLC_CSV_DEST" "$PERFORMANCE_PNG"
   : > "$BENCHMARK_LOG"
+  configure_maxn_super
   info "Locking Jetson clocks before benchmark..."
   ensure_sudo_auth
   run_sudo jetson_clocks
@@ -419,9 +452,18 @@ run_benchmark() {
   trap 'stop_tegrastats' EXIT
   trap 'exit 130' INT TERM HUP
 
-  info "Running MLC benchmark..."
+  info "Running selected MLC benchmarks (6 models)..."
   set +e
-  bash "$benchmark_script" 2>&1 | tee "$BENCHMARK_LOG"
+  {
+    bash "$benchmark_script" meta-llama/Llama-3.1-8B-Instruct
+    bash "$benchmark_script" meta-llama/Llama-3.2-3B-Instruct
+    MAX_CONTEXT_LEN=2048 PREFILL_CHUNK_SIZE=1024 \
+      bash "$benchmark_script" Qwen/Qwen2.5-7B-Instruct
+    QUANTIZATION=q4f16_1 \
+      bash "$benchmark_script" google/gemma-2-2b-it
+    bash "$benchmark_script" microsoft/Phi-3.5-mini-instruct
+    bash "$benchmark_script" HuggingFaceTB/SmolLM2-1.7B-Instruct
+  } 2>&1 | tee "$BENCHMARK_LOG"
   benchmark_rc="${PIPESTATUS[0]}"
   set -e
 
