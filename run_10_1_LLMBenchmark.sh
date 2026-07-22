@@ -104,6 +104,25 @@ ensure_sudo_auth() {
   [[ $EUID -eq 0 ]] || sudo -v
 }
 
+wait_for_apt_lock() {
+  local waited=0 timeout_seconds="${1:-300}"
+  local lock_files=(
+    /var/lib/dpkg/lock-frontend
+    /var/lib/dpkg/lock
+    /var/lib/apt/lists/lock
+    /var/cache/apt/archives/lock
+  )
+
+  while run_sudo fuser "${lock_files[@]}" >/dev/null 2>&1; do
+    if ((waited == 0)); then
+      warn "Another apt/dpkg process is active; waiting up to ${timeout_seconds}s for its lock."
+    fi
+    ((waited >= timeout_seconds)) && die "Timed out waiting for apt/dpkg to finish."
+    sleep 2
+    ((waited += 2))
+  done
+}
+
 configure_maxn_super() {
   local config="/etc/nvpmodel.conf" current_mode mode_id
 
@@ -194,10 +213,12 @@ configure_swap() {
 }
 
 install_docker_if_missing() {
-  local installer
+  local installer attempt docker_installed=0
 
+  wait_for_apt_lock 300
   run_sudo apt-get update
-  run_sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  run_sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+    -o DPkg::Lock::Timeout=300 install -y \
     nano nvidia-jetpack git curl jq python3 python3-matplotlib \
     mono-runtime libmono-system-drawing4.0-cil \
     libmono-system-windows-forms4.0-cil libgdiplus nvidia-container
@@ -206,8 +227,17 @@ install_docker_if_missing() {
     info "Docker is not installed; installing Docker Engine..."
     installer="$(mktemp)"
     curl -fsSL https://get.docker.com -o "$installer"
-    run_sudo sh "$installer"
+    for attempt in 1 2 3; do
+      wait_for_apt_lock 300
+      if run_sudo sh "$installer"; then
+        docker_installed=1
+        break
+      fi
+      warn "Docker installation attempt $attempt failed; retrying after apt/dpkg settles."
+      sleep 10
+    done
     rm -f "$installer"
+    ((docker_installed == 1)) || die "Docker installation failed after 3 attempts."
   else
     info "Docker already installed: $(docker --version 2>/dev/null || true)"
   fi
