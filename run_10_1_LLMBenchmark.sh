@@ -148,6 +148,8 @@ configure_headless() {
 }
 
 configure_swap() {
+  local zram_device
+
   if [[ "$USE_DISK_SWAP" == "0" ]]; then
     info "Using NVIDIA zram; disk swap file will not be created or mounted."
     if service_exists nvzramconfig.service; then
@@ -162,6 +164,16 @@ configure_swap() {
   info "Configuring 16 GB swap: $SWAP_FILE"
   if service_exists nvzramconfig.service; then
     run_sudo systemctl disable --now nvzramconfig.service
+  fi
+
+  while IFS= read -r zram_device; do
+    [[ -n "$zram_device" ]] || continue
+    info "Disabling NVIDIA zram swap: $zram_device"
+    run_sudo swapoff "$zram_device"
+  done < <(swapon --show=NAME --noheadings 2>/dev/null | awk '$1 ~ /^\/dev\/zram/ { print $1 }')
+
+  if swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
+    die "NVIDIA zram is still active after swapoff; refusing to run with mixed swap devices."
   fi
 
   if [[ ! -f "$SWAP_FILE" ]]; then
@@ -254,12 +266,9 @@ verify_post_reboot() {
   command -v tegrastats >/dev/null 2>&1 || die "tegrastats is not installed. Re-run with --prepare."
 
   if [[ "$USE_DISK_SWAP" == "1" ]]; then
-    [[ -f "$SWAP_FILE" ]] || die "$SWAP_FILE is missing. Re-run with USE_DISK_SWAP=1 and --prepare to create it."
-    if ! swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$SWAP_FILE"; then
-      warn "$SWAP_FILE is not active; attempting to enable it."
-      ensure_sudo_auth
-      run_sudo swapon "$SWAP_FILE"
-    fi
+    info "Enforcing disk-only swap before benchmark."
+    ensure_sudo_auth
+    configure_swap
   elif ! swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
     warn "No NVIDIA zram swap is active; attempting to start nvzramconfig."
     ensure_sudo_auth
@@ -506,6 +515,7 @@ show_status() {
   info "Docker command:    $(command -v docker 2>/dev/null || echo missing)"
   info "Docker service:    $(systemctl is-active docker.service 2>/dev/null || true)"
   info "Swap file active:  $(swapon --show=NAME --noheadings 2>/dev/null | grep -Fx "$SWAP_FILE" || echo no)"
+  info "Zram swap active:  $(swapon --show=NAME --noheadings 2>/dev/null | grep '^/dev/zram' || echo no)"
 }
 
 main() {
