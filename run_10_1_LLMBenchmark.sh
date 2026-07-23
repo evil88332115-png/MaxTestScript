@@ -3,13 +3,13 @@ set -Eeuo pipefail
 
 # 10-1 LLM Benchmark
 #
-# First run:
-#   Install/configure JetPack, headless boot, swap, Docker, and the NVIDIA
-#   container runtime.  Save the current boot ID and reboot once.
+# First run installs/configures the optional JetPack package, Docker, the
+# NVIDIA container runtime, disk swap, and jetson-containers.  It then switches
+# the current boot to runlevel 3 without changing the default boot target or
+# disabling nvargus-daemon.  No reboot is required.
 #
-# Runs after that reboot:
-#   Install/reuse jetson-containers, record tegrastats only while the MLC
-#   benchmark is running, draw CPU/GPU/TJ temperatures, and collect mlc.csv.
+# Every benchmark run records tegrastats only while MLC is running, draws
+# CPU/GPU/TJ temperatures, and collects mlc.csv.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_USER="${TEST_USER:-${SUDO_USER:-$(id -un)}}"
@@ -18,14 +18,19 @@ USER_HOME="${USER_HOME:-$(getent passwd "$TEST_USER" | cut -d: -f6)}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-${USER_HOME}/10-1}"
 STATE_DIR="${STATE_DIR:-${USER_HOME}/.local/state/MaxTestScript/10-1-llm-benchmark}"
-PREPARED_BOOT_FILE="${STATE_DIR}/prepared_boot_id"
+PREPARED_MARKER="${STATE_DIR}/system-prepared"
 JETSON_INSTALL_MARKER="${STATE_DIR}/jetson-containers-installed"
 JETSON_CONTAINERS_DIR="${JETSON_CONTAINERS_DIR:-${USER_HOME}/jetson-containers}"
 DRAW_TEMP_SCRIPT="${DRAW_TEMP_SCRIPT:-${SCRIPT_DIR}/drawtempcurve_auto.py}"
 CHART_GENERATOR="${CHART_GENERATOR:-${SCRIPT_DIR}/LLMChartGenerator.exe}"
 MLC_CSV_SOURCE="${MLC_CSV_SOURCE:-}"
 SWAP_FILE="${SWAP_FILE:-/mnt/16GB.swap}"
-USE_DISK_SWAP="${USE_DISK_SWAP:-1}"
+INSTALL_JETPACK="${INSTALL_JETPACK:-}"
+MLC_CACHE_MODE="${MLC_CACHE_MODE:-}"
+MLC_MODEL_COUNT="${MLC_MODEL_COUNT:-}"
+NAS_MOUNT_POINT="${NAS_MOUNT_POINT:-${MOUNT_POINT:-/mnt/nas_home}}"
+NAS_MLC_DIR="${NAS_MLC_DIR:-${NAS_MOUNT_POINT}/MaxTestScript/10-1-MLC-model-cache}"
+MLC_CACHE_DIR="${JETSON_CONTAINERS_DIR}/data/models/mlc/cache"
 TEGRATS_INTERVAL_MS="${TEGRATS_INTERVAL_MS:-1000}"
 
 TEGRATS_LOG="${OUTPUT_DIR}/tegrastats.log"
@@ -62,15 +67,23 @@ usage() {
   cat <<'EOF'
 Usage: run_10_1_LLMBenchmark.sh [--prepare] [--status]
 
-  --prepare  Run the preparation stage again and schedule one reboot.
+  --prepare  Run the package, container-runtime, and swap preparation again.
   --status   Show preparation and runtime status without changing anything.
 
 Environment overrides:
   OUTPUT_DIR, JETSON_CONTAINERS_DIR, DRAW_TEMP_SCRIPT, CHART_GENERATOR,
-  MLC_CSV_SOURCE, DUT_NAME, USE_DISK_SWAP, SWAP_FILE, TEGRATS_INTERVAL_MS
+  MLC_CSV_SOURCE, DUT_NAME, SWAP_FILE, INSTALL_JETPACK,
+  MLC_CACHE_MODE, MLC_MODEL_COUNT,
+  NAS_MOUNT_POINT, NAS_MLC_DIR, TEGRATS_INTERVAL_MS
 
-  USE_DISK_SWAP=0  Use NVIDIA zram.
-  USE_DISK_SWAP=1  Disable zram and create/use the 16 GB SWAP_FILE (default).
+  INSTALL_JETPACK=0  Skip the nvidia-jetpack meta package.
+  INSTALL_JETPACK=1  Install the nvidia-jetpack meta package during preparation.
+  MLC_CACHE_MODE=remove  Use the original benchmark flow and remove model cache.
+  MLC_CACHE_MODE=keep    Keep downloaded weights and JIT libraries for reuse.
+  MLC_CACHE_MODE=upload  Upload the retained model cache to NAS.
+  MLC_CACHE_MODE=download  Restore the model cache from NAS, then run and keep it.
+  MLC_MODEL_COUNT=6   Run the selected six-model benchmark set.
+  MLC_MODEL_COUNT=12  Run all 12 models from the MLC benchmark script.
 EOF
 }
 
@@ -87,10 +100,6 @@ while (($#)); do
 done
 
 mkdir -p "$OUTPUT_DIR" "$STATE_DIR"
-
-current_boot_id() {
-  tr -d '\n' < /proc/sys/kernel/random/boot_id
-}
 
 run_sudo() {
   if [[ $EUID -eq 0 ]]; then
@@ -154,74 +163,50 @@ configure_maxn_super() {
     die "Power mode verification failed; expected MAXN_SUPER."
 }
 
-service_exists() {
-  systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q .
-}
+select_jetpack_installation() {
+  local choice
 
-configure_headless() {
-  info "Configuring headless boot..."
-  run_sudo systemctl set-default multi-user.target
-  if service_exists nvargus-daemon.service; then
-    run_sudo systemctl disable nvargus-daemon.service
-  fi
-}
+  case "${INSTALL_JETPACK,,}" in
+    1|yes|y|install) INSTALL_JETPACK="1"; return ;;
+    0|no|n|skip) INSTALL_JETPACK="0"; return ;;
+    "") ;;
+    *) die "INSTALL_JETPACK must be 0 or 1." ;;
+  esac
 
-configure_swap() {
-  local zram_device
-
-  if [[ "$USE_DISK_SWAP" == "0" ]]; then
-    info "Using NVIDIA zram; disk swap file will not be created or mounted."
-    if service_exists nvzramconfig.service; then
-      run_sudo systemctl enable nvzramconfig.service
-      if ! swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
-        run_sudo systemctl start nvzramconfig.service
-      fi
-    fi
-    return
-  fi
-
-  info "Configuring 16 GB swap: $SWAP_FILE"
-  if service_exists nvzramconfig.service; then
-    run_sudo systemctl disable --now nvzramconfig.service
-  fi
-
-  while IFS= read -r zram_device; do
-    [[ -n "$zram_device" ]] || continue
-    info "Disabling NVIDIA zram swap: $zram_device"
-    run_sudo swapoff "$zram_device"
-  done < <(swapon --show=NAME --noheadings 2>/dev/null | awk '$1 ~ /^\/dev\/zram/ { print $1 }')
-
-  if swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
-    die "NVIDIA zram is still active after swapoff; refusing to run with mixed swap devices."
-  fi
-
-  if [[ ! -f "$SWAP_FILE" ]]; then
-    run_sudo fallocate -l 16G "$SWAP_FILE"
-    run_sudo chmod 600 "$SWAP_FILE"
-    run_sudo mkswap "$SWAP_FILE"
-  elif ! run_sudo file "$SWAP_FILE" | grep -qi 'swap file'; then
-    die "$SWAP_FILE exists but is not a swap file; refusing to overwrite it."
-  fi
-
-  if ! swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$SWAP_FILE"; then
-    run_sudo swapon "$SWAP_FILE"
-  fi
-
-  if ! grep -Eq "^[[:space:]]*${SWAP_FILE//\//\\/}[[:space:]]+none[[:space:]]+swap[[:space:]]" /etc/fstab; then
-    printf '%s\n' "$SWAP_FILE  none  swap  sw  0  0" | run_sudo tee -a /etc/fstab >/dev/null
-  fi
+  [[ -t 0 ]] || die "No interactive terminal is available. Set INSTALL_JETPACK=0 or INSTALL_JETPACK=1."
+  while true; do
+    printf '\n是否安裝完整的 nvidia-jetpack？\n'
+    printf '  1. 是，安裝 nvidia-jetpack（下載量與安裝空間較大）\n'
+    printf '  2. 否，只安裝其餘必要工具與 Docker 環境\n'
+    read -r -p "請選擇 [1/2]：" choice
+    case "$choice" in
+      1) INSTALL_JETPACK="1"; return ;;
+      2) INSTALL_JETPACK="0"; return ;;
+      *) warn "請輸入 1 或 2。" ;;
+    esac
+  done
 }
 
 install_docker_if_missing() {
   local installer attempt docker_installed=0
+  local packages=(
+    nano git curl jq python3 python3-matplotlib
+    mono-runtime libmono-system-drawing4.0-cil
+    libmono-system-windows-forms4.0-cil libgdiplus nvidia-container rsync
+  )
+
+  if [[ "$INSTALL_JETPACK" == "1" ]]; then
+    packages+=(nvidia-jetpack)
+    info "nvidia-jetpack installation was selected."
+  else
+    info "Skipping the nvidia-jetpack meta package as selected."
+  fi
 
   wait_for_apt_lock 300
   run_sudo apt-get update
   run_sudo env DEBIAN_FRONTEND=noninteractive apt-get \
     -o DPkg::Lock::Timeout=300 install -y \
-    nano nvidia-jetpack git curl jq python3 python3-matplotlib \
-    mono-runtime libmono-system-drawing4.0-cil \
-    libmono-system-windows-forms4.0-cil libgdiplus nvidia-container
+    "${packages[@]}"
 
   if ! command -v docker >/dev/null 2>&1; then
     info "Docker is not installed; installing Docker Engine..."
@@ -259,54 +244,89 @@ install_docker_if_missing() {
 }
 
 prepare_system() {
-  local boot_id
-
   ensure_sudo_auth
-  configure_headless
-  configure_swap
+  configure_disk_swap
   install_docker_if_missing
-
-  boot_id="$(current_boot_id)"
-  printf '%s\n' "$boot_id" > "$PREPARED_BOOT_FILE"
-  sync
   configure_maxn_super
+  touch "$PREPARED_MARKER"
+  sync
 
   pass "RESULT,LLM_BENCHMARK,PREPARE,PASS"
-  info "Preparation is complete. The system will reboot into headless mode."
-  info "After reboot, run this same script again to start temperature logging and the benchmark."
-  sleep 3
-  run_sudo reboot
+  info "Preparation is complete; no reboot is required."
 }
 
-verify_post_reboot() {
-  local prepared_boot current_boot default_target
+configure_disk_swap() {
+  local zram_device
 
-  [[ -s "$PREPARED_BOOT_FILE" ]] || die "Preparation state is missing. Run this script normally to prepare the system."
-  prepared_boot="$(tr -d '\n' < "$PREPARED_BOOT_FILE")"
-  current_boot="$(current_boot_id)"
-  if [[ "$prepared_boot" == "$current_boot" ]]; then
-    die "Preparation finished in this boot, but the required reboot has not happened yet. Run: sudo reboot"
+  info "Configuring the 16 GB disk swap: $SWAP_FILE"
+  if systemctl list-unit-files nvzramconfig.service --no-legend 2>/dev/null | grep -q .; then
+    run_sudo systemctl disable --now nvzramconfig.service
   fi
+  while IFS= read -r zram_device; do
+    [[ -n "$zram_device" ]] || continue
+    run_sudo swapoff "$zram_device"
+  done < <(swapon --show=NAME --noheadings 2>/dev/null | awk '$1 ~ /^\/dev\/zram/ { print $1 }')
 
-  default_target="$(systemctl get-default 2>/dev/null || true)"
-  [[ "$default_target" == "multi-user.target" ]] || die "Default target is $default_target, expected multi-user.target."
+  if [[ ! -f "$SWAP_FILE" ]]; then
+    run_sudo fallocate -l 16G "$SWAP_FILE"
+    run_sudo chmod 600 "$SWAP_FILE"
+    run_sudo mkswap "$SWAP_FILE"
+  elif ! run_sudo file "$SWAP_FILE" | grep -qi 'swap file'; then
+    die "$SWAP_FILE exists but is not a swap file; refusing to overwrite it."
+  fi
+  if ! swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$SWAP_FILE"; then
+    run_sudo swapon "$SWAP_FILE"
+  fi
+  if ! grep -Eq "^[[:space:]]*${SWAP_FILE//\//\\/}[[:space:]]+none[[:space:]]+swap[[:space:]]" /etc/fstab; then
+    printf '%s\n' "$SWAP_FILE  none  swap  sw  0  0" | run_sudo tee -a /etc/fstab >/dev/null
+  fi
+  info "NVIDIA zram is disabled and the 16 GB disk swap is active."
+}
+
+verify_runtime() {
+  [[ -e "$PREPARED_MARKER" ]] || die "Preparation state is missing. Re-run with --prepare."
   command -v docker >/dev/null 2>&1 || die "Docker is not installed. Re-run with --prepare."
   systemctl is-active --quiet docker.service || die "Docker service is not active."
-  docker info >/dev/null 2>&1 || die "Current user cannot use Docker. Confirm the reboot and docker group membership."
   command -v tegrastats >/dev/null 2>&1 || die "tegrastats is not installed. Re-run with --prepare."
+}
 
-  if [[ "$USE_DISK_SWAP" == "1" ]]; then
-    info "Enforcing disk-only swap before benchmark."
-    ensure_sudo_auth
-    configure_swap
-  elif ! swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
-    warn "No NVIDIA zram swap is active; attempting to start nvzramconfig."
-    ensure_sudo_auth
-    run_sudo systemctl enable nvzramconfig.service
-    run_sudo systemctl start nvzramconfig.service
-    swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram' || \
-      die "NVIDIA zram did not become active."
+ensure_docker_group_access() {
+  local group_members script_path
+
+  docker info >/dev/null 2>&1 && return 0
+
+  group_members="$(getent group docker 2>/dev/null | cut -d: -f4 || true)"
+  if [[ ",$group_members," != *",$TEST_USER,"* ]]; then
+    die "Current user is not a member of the docker group after preparation."
   fi
+
+  command -v sg >/dev/null 2>&1 || \
+    die "Docker group membership is not active yet and the sg command is unavailable. Reconnect SSH and run the script again."
+
+  script_path="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+  export MAXTESTSCRIPT_REEXEC_PATH="$script_path"
+  info "Activating the new docker group membership without rebooting..."
+  exec sg docker -c 'exec bash "$MAXTESTSCRIPT_REEXEC_PATH"'
+}
+
+switch_to_runlevel_3() {
+  local started_at elapsed
+
+  ensure_sudo_auth
+  info "Switching the current boot to runlevel 3 with: sudo init 3"
+  info "This normally appears to pause for 30-60 seconds; the script will continue when it returns."
+  started_at="$(date +%s)"
+  run_sudo init 3
+  elapsed="$(( $(date +%s) - started_at ))"
+  info "Runlevel 3 switch returned after ${elapsed} seconds."
+
+  if systemctl is-active --quiet display-manager.service; then
+    die "Desktop GUI is still active after sudo init 3."
+  fi
+  systemctl is-active --quiet ssh.service || die "SSH service is not active after sudo init 3."
+  systemctl is-active --quiet docker.service || die "Docker service is not active after sudo init 3."
+  docker info >/dev/null 2>&1 || die "Docker is not usable after sudo init 3."
+  pass "Runlevel 3 verified: desktop GUI stopped; SSH and Docker are active."
 }
 
 ensure_jetson_containers() {
@@ -326,6 +346,181 @@ ensure_jetson_containers() {
   else
     info "jetson-containers installation marker found; skipping install.sh."
   fi
+}
+
+select_mlc_cache_mode() {
+  local choice
+
+  case "${MLC_CACHE_MODE,,}" in
+    remove|original|1) MLC_CACHE_MODE="remove"; return ;;
+    keep|2) MLC_CACHE_MODE="keep"; return ;;
+    upload|nas-upload|3) MLC_CACHE_MODE="upload"; return ;;
+    download|restore|nas-download|4) MLC_CACHE_MODE="download"; return ;;
+    "") ;;
+    *) die "MLC_CACHE_MODE must be remove, keep, upload, or download." ;;
+  esac
+
+  [[ -t 0 ]] || die "No interactive terminal is available. Set MLC_CACHE_MODE=remove, keep, upload, or download."
+  while true; do
+    printf '\nMLC 模型與快取要如何處理？\n'
+    printf '  1. 原流程（模型與 JIT 快取會移除）\n'
+    printf '  2. 留下模型（下次執行可重用，會占用 SSD 空間）\n'
+    printf '  3. 將已保留的模型上傳到 NAS（不執行 benchmark）\n'
+    printf '  4. 從 NAS 下載模型並放回 cache，然後執行 benchmark\n'
+    read -r -p "請選擇 [1/2/3/4]：" choice
+    case "$choice" in
+      1) MLC_CACHE_MODE="remove"; return ;;
+      2) MLC_CACHE_MODE="keep"; return ;;
+      3) MLC_CACHE_MODE="upload"; return ;;
+      4) MLC_CACHE_MODE="download"; return ;;
+      *) warn "請輸入 1、2、3 或 4。" ;;
+    esac
+  done
+}
+
+select_mlc_model_count() {
+  local choice
+
+  case "${MLC_MODEL_COUNT,,}" in
+    6|short) MLC_MODEL_COUNT="6"; return ;;
+    12|all|full) MLC_MODEL_COUNT="12"; return ;;
+    "") ;;
+    *) die "MLC_MODEL_COUNT must be 6 or 12." ;;
+  esac
+
+  [[ -t 0 ]] || die "No interactive terminal is available. Set MLC_MODEL_COUNT=6 or MLC_MODEL_COUNT=12."
+  while true; do
+    printf '\n要執行幾個 MLC 模型？\n'
+    printf '  1. 執行精簡的 6 個模型\n'
+    printf '  2. 執行 benchmark.sh 完整的 12 個模型\n'
+    read -r -p "請選擇 [1/2]：" choice
+    case "$choice" in
+      1) MLC_MODEL_COUNT="6"; return ;;
+      2) MLC_MODEL_COUNT="12"; return ;;
+      *) warn "請輸入 1 或 2。" ;;
+    esac
+  done
+}
+
+require_nas_mount() {
+  command -v mountpoint >/dev/null 2>&1 || die "mountpoint is not installed. Run run_1_requirement.sh first."
+  if ! mountpoint -q "$NAS_MOUNT_POINT"; then
+    die "NAS is not mounted at $NAS_MOUNT_POINT. Run $SCRIPT_DIR/run_0_mount_nas.sh first."
+  fi
+}
+
+directory_has_files() {
+  [[ -d "$1" ]] && [[ -n "$(find "$1" -mindepth 1 -print -quit 2>/dev/null)" ]]
+}
+
+ensure_rsync() {
+  command -v rsync >/dev/null 2>&1 && return 0
+
+  info "rsync is not installed; installing it for NAS transfer progress..."
+  ensure_sudo_auth
+  wait_for_apt_lock 300
+  run_sudo apt-get update
+  run_sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+    -o DPkg::Lock::Timeout=300 install -y rsync
+  command -v rsync >/dev/null 2>&1 || die "rsync installation failed."
+}
+
+copy_cache_with_progress() {
+  local source="$1" destination="$2"
+  rsync -aL --human-readable --info=progress2 --no-inc-recursive \
+    "$source/" "$destination/"
+}
+
+copy_six_model_cache_with_progress() {
+  local source="$1" destination="$2"
+  local include_rules=(
+    '/.gitkeep'
+    '/model_lib/***'
+    '/model_weights/'
+    '/model_weights/hf/'
+    '/model_weights/hf/dusty-nv/'
+    '/model_weights/hf/dusty-nv/Llama-3.1-8B-Instruct-q4f16_ft-MLC/***'
+    '/model_weights/hf/dusty-nv/Llama-3.2-3B-Instruct-q4f16_ft-MLC/***'
+    '/model_weights/hf/dusty-nv/Qwen2.5-7B-Instruct-q4f16_ft-MLC/***'
+    '/model_weights/hf/dusty-nv/Phi-3.5-mini-instruct-q4f16_ft-MLC/***'
+    '/model_weights/hf/dusty-nv/SmolLM2-1.7B-Instruct-q4f16_ft-MLC/***'
+    '/model_weights/hf/mlc-ai/'
+    '/model_weights/hf/mlc-ai/gemma-2-2b-it-q4f16_1-MLC/***'
+  )
+  local rsync_args=(
+    -aL --human-readable --info=progress2 --no-inc-recursive
+    --prune-empty-dirs
+  )
+  local rule
+
+  for rule in "${include_rules[@]}"; do
+    rsync_args+=("--include=$rule")
+  done
+  rsync_args+=(--exclude='*')
+  rsync "${rsync_args[@]}" "$source/" "$destination/"
+}
+
+show_cache_size() {
+  local path="$1" label="$2"
+  info "  $label: $path"
+  info "  Size:  $(du -sh "$path" 2>/dev/null | awk '{print $1}')"
+  info "  Files: $(find "$path" -type f 2>/dev/null | wc -l)"
+}
+
+upload_mlc_cache_to_nas() {
+  require_nas_mount
+  directory_has_files "$MLC_CACHE_DIR" || \
+    die "No retained MLC model cache was found at $MLC_CACHE_DIR. Run option 2 first."
+
+  ensure_rsync
+  mkdir -p "$NAS_MLC_DIR"
+  info "Uploading retained MLC model cache to NAS..."
+  show_cache_size "$MLC_CACHE_DIR" "Local cache"
+  # Dereference any cache symlinks because CIFS shares commonly do not support them.
+  copy_cache_with_progress "$MLC_CACHE_DIR" "$NAS_MLC_DIR"
+  printf 'source=%s\nhost=%s\nupdated=%s\n' \
+    "$MLC_CACHE_DIR" "$(hostname)" "$(date --iso-8601=seconds)" \
+    > "$NAS_MLC_DIR/.MaxTestScript-backup-info"
+  sync
+  show_cache_size "$NAS_MLC_DIR" "NAS backup"
+  pass "RESULT,MLC_CACHE,NAS_UPLOAD,PASS,path=$NAS_MLC_DIR"
+}
+
+download_mlc_cache_from_nas() {
+  require_nas_mount
+  directory_has_files "$NAS_MLC_DIR" || \
+    die "No MLC model backup was found at $NAS_MLC_DIR. Upload one with option 3 first."
+
+  ensure_rsync
+  mkdir -p "$MLC_CACHE_DIR"
+  info "Restoring the $MLC_MODEL_COUNT-model MLC cache set from NAS..."
+  show_cache_size "$NAS_MLC_DIR" "NAS backup"
+  if [[ "$MLC_MODEL_COUNT" == "6" ]]; then
+    copy_six_model_cache_with_progress "$NAS_MLC_DIR" "$MLC_CACHE_DIR"
+  else
+    copy_cache_with_progress "$NAS_MLC_DIR" "$MLC_CACHE_DIR"
+  fi
+  rm -f "$MLC_CACHE_DIR/.MaxTestScript-backup-info"
+  sync
+  show_cache_size "$MLC_CACHE_DIR" "Restored local cache"
+  pass "RESULT,MLC_CACHE,NAS_DOWNLOAD,PASS,path=$MLC_CACHE_DIR"
+}
+
+make_keep_models_benchmark_copy() {
+  local source_script="$1" destination_script="$2"
+
+  sed \
+    -e 's|python3 benchmark.py|MLC_LLM_HOME=/data/models/mlc/cache python3 benchmark.py|' \
+    -e '/rm -rf \/data\/models\/mlc\/cache\/\* || true/d' \
+    "$source_script" > "$destination_script"
+
+  grep -q 'MLC_LLM_HOME=/data/models/mlc/cache python3 benchmark.py' "$destination_script" || \
+    die "Unable to enable the persistent MLC model cache in the benchmark copy."
+  if grep -q 'rm -rf /data/models/mlc/cache' "$destination_script"; then
+    die "The keep-models benchmark copy still contains a cache removal command."
+  fi
+  chmod +x "$destination_script"
+  info "Keeping MLC weights and JIT libraries under: $JETSON_CONTAINERS_DIR/data/models/mlc/cache"
 }
 
 start_tegrastats() {
@@ -474,12 +669,58 @@ draw_llm_performance_chart() {
   [[ -s "$PERFORMANCE_PNG" ]]
 }
 
+run_selected_mlc_models() {
+  local benchmark_script="$1"
+
+  if [[ "$MLC_MODEL_COUNT" == "12" ]]; then
+    # With no model arguments, NVIDIA's benchmark.sh runs its default 12 models.
+    bash "$benchmark_script"
+    return
+  fi
+
+  bash "$benchmark_script" meta-llama/Llama-3.1-8B-Instruct
+  bash "$benchmark_script" meta-llama/Llama-3.2-3B-Instruct
+  MAX_CONTEXT_LEN=2048 PREFILL_CHUNK_SIZE=1024 \
+    bash "$benchmark_script" Qwen/Qwen2.5-7B-Instruct
+  QUANTIZATION=q4f16_1 \
+    bash "$benchmark_script" google/gemma-2-2b-it
+  bash "$benchmark_script" microsoft/Phi-3.5-mini-instruct
+  bash "$benchmark_script" HuggingFaceTB/SmolLM2-1.7B-Instruct
+}
+
 run_benchmark() {
-  local benchmark_script benchmark_rc graph_rc=0 csv_rc=0 performance_rc=0
+  local benchmark_script original_benchmark_script benchmark_rc graph_rc=0 csv_rc=0 performance_rc=0
 
-  benchmark_script="$JETSON_CONTAINERS_DIR/packages/llm/mlc/benchmark.sh"
-  [[ -f "$benchmark_script" ]] || die "MLC benchmark script not found: $benchmark_script"
+  original_benchmark_script="$JETSON_CONTAINERS_DIR/packages/llm/mlc/benchmark.sh"
+  [[ -f "$original_benchmark_script" ]] || die "MLC benchmark script not found: $original_benchmark_script"
+  while true; do
+    select_mlc_cache_mode
+    if [[ "$MLC_CACHE_MODE" == "upload" ]]; then
+      upload_mlc_cache_to_nas
+      if [[ ! -t 0 ]]; then
+        return 0
+      fi
+      MLC_CACHE_MODE=""
+      info "NAS upload completed; returning to the MLC cache menu."
+      continue
+    fi
+    break
+  done
+  select_mlc_model_count
+  if [[ "$MLC_CACHE_MODE" == "download" ]]; then
+    download_mlc_cache_from_nas
+    MLC_CACHE_MODE="keep"
+    info "NAS restore completed; continuing in keep-models mode."
+  fi
+  if [[ "$MLC_CACHE_MODE" == "keep" ]]; then
+    benchmark_script="$STATE_DIR/benchmark-keep-models.sh"
+    make_keep_models_benchmark_copy "$original_benchmark_script" "$benchmark_script"
+  else
+    benchmark_script="$original_benchmark_script"
+    info "Using the original MLC flow; each model cache will be removed after its benchmark."
+  fi
 
+  switch_to_runlevel_3
   rm -f "$TEMP_PNG" "$MLC_CSV_DEST" "$PERFORMANCE_PNG"
   : > "$BENCHMARK_LOG"
   configure_maxn_super
@@ -488,18 +729,9 @@ run_benchmark() {
   trap 'stop_tegrastats' EXIT
   trap 'exit 130' INT TERM HUP
 
-  info "Running selected MLC benchmarks (6 models)..."
+  info "Running selected MLC benchmarks ($MLC_MODEL_COUNT models)..."
   set +e
-  {
-    bash "$benchmark_script" meta-llama/Llama-3.1-8B-Instruct
-    bash "$benchmark_script" meta-llama/Llama-3.2-3B-Instruct
-    MAX_CONTEXT_LEN=2048 PREFILL_CHUNK_SIZE=1024 \
-      bash "$benchmark_script" Qwen/Qwen2.5-7B-Instruct
-    QUANTIZATION=q4f16_1 \
-      bash "$benchmark_script" google/gemma-2-2b-it
-    bash "$benchmark_script" microsoft/Phi-3.5-mini-instruct
-    bash "$benchmark_script" HuggingFaceTB/SmolLM2-1.7B-Instruct
-  } 2>&1 | tee "$BENCHMARK_LOG"
+  run_selected_mlc_models "$benchmark_script" 2>&1 | tee "$BENCHMARK_LOG"
   benchmark_rc="${PIPESTATUS[0]}"
   set -e
 
@@ -534,35 +766,35 @@ run_benchmark() {
 }
 
 show_status() {
-  local prepared_boot="not-prepared"
-  [[ -s "$PREPARED_BOOT_FILE" ]] && prepared_boot="$(tr -d '\n' < "$PREPARED_BOOT_FILE")"
   info "User:              $TEST_USER"
   info "Home:              $USER_HOME"
   info "Output:            $OUTPUT_DIR"
-  info "Prepared boot ID:  $prepared_boot"
-  info "Current boot ID:   $(current_boot_id)"
+  if [[ -e "$PREPARED_MARKER" ]]; then
+    info "System prepared:   yes"
+  else
+    info "System prepared:   no"
+  fi
   info "Default target:    $(systemctl get-default 2>/dev/null || echo unknown)"
+  info "Display manager:   $(systemctl is-active display-manager.service 2>/dev/null || true)"
+  info "nvargus daemon:    $(systemctl is-active nvargus-daemon.service 2>/dev/null || true)"
   info "Docker command:    $(command -v docker 2>/dev/null || echo missing)"
   info "Docker service:    $(systemctl is-active docker.service 2>/dev/null || true)"
-  info "Swap file active:  $(swapon --show=NAME --noheadings 2>/dev/null | grep -Fx "$SWAP_FILE" || echo no)"
-  info "Zram swap active:  $(swapon --show=NAME --noheadings 2>/dev/null | grep '^/dev/zram' || echo no)"
+  info "Active swap:       $(swapon --show=NAME --noheadings 2>/dev/null | paste -sd, - || echo none)"
 }
 
 main() {
-  [[ "$USE_DISK_SWAP" == "0" || "$USE_DISK_SWAP" == "1" ]] || \
-    die "USE_DISK_SWAP must be 0 or 1."
-
   if ((STATUS_ONLY)); then
     show_status
     exit 0
   fi
 
-  if ((FORCE_PREPARE)) || [[ ! -s "$PREPARED_BOOT_FILE" ]]; then
+  if ((FORCE_PREPARE)) || [[ ! -e "$PREPARED_MARKER" ]]; then
+    select_jetpack_installation
     prepare_system
-    exit 0
   fi
 
-  verify_post_reboot
+  verify_runtime
+  ensure_docker_group_access
   ensure_jetson_containers
   run_benchmark
 }
