@@ -4,9 +4,10 @@ set -Eeuo pipefail
 # 10-1 LLM Benchmark
 #
 # First run installs/configures the optional JetPack package, Docker, the
-# NVIDIA container runtime, disk swap, and jetson-containers.  It then switches
+# NVIDIA container runtime and jetson-containers.  It then switches
 # the current boot to runlevel 3 without changing the default boot target or
-# disabling nvargus-daemon.  No reboot is required.
+# disabling nvargus-daemon.  Swap is turned off only for the benchmark run.
+# No reboot is required.
 #
 # Every benchmark run records tegrastats only while MLC is running, draws
 # CPU/GPU/TJ temperatures, and collects mlc.csv.
@@ -24,7 +25,6 @@ JETSON_CONTAINERS_DIR="${JETSON_CONTAINERS_DIR:-${USER_HOME}/jetson-containers}"
 DRAW_TEMP_SCRIPT="${DRAW_TEMP_SCRIPT:-${SCRIPT_DIR}/drawtempcurve_auto.py}"
 CHART_GENERATOR="${CHART_GENERATOR:-${SCRIPT_DIR}/LLMChartGenerator.exe}"
 MLC_CSV_SOURCE="${MLC_CSV_SOURCE:-}"
-SWAP_FILE="${SWAP_FILE:-/mnt/16GB.swap}"
 INSTALL_JETPACK="${INSTALL_JETPACK:-}"
 MLC_CACHE_MODE="${MLC_CACHE_MODE:-}"
 MLC_MODEL_COUNT="${MLC_MODEL_COUNT:-}"
@@ -67,12 +67,12 @@ usage() {
   cat <<'EOF'
 Usage: run_10_1_LLMBenchmark.sh [--prepare] [--status]
 
-  --prepare  Run the package, container-runtime, and swap preparation again.
+  --prepare  Run the package and container-runtime preparation again.
   --status   Show preparation and runtime status without changing anything.
 
 Environment overrides:
   OUTPUT_DIR, JETSON_CONTAINERS_DIR, DRAW_TEMP_SCRIPT, CHART_GENERATOR,
-  MLC_CSV_SOURCE, DUT_NAME, SWAP_FILE, INSTALL_JETPACK,
+  MLC_CSV_SOURCE, DUT_NAME, INSTALL_JETPACK,
   MLC_CACHE_MODE, MLC_MODEL_COUNT,
   NAS_MOUNT_POINT, NAS_MLC_DIR, TEGRATS_INTERVAL_MS
 
@@ -245,7 +245,6 @@ install_docker_if_missing() {
 
 prepare_system() {
   ensure_sudo_auth
-  configure_disk_swap
   install_docker_if_missing
   configure_maxn_super
   touch "$PREPARED_MARKER"
@@ -253,34 +252,6 @@ prepare_system() {
 
   pass "RESULT,LLM_BENCHMARK,PREPARE,PASS"
   info "Preparation is complete; no reboot is required."
-}
-
-configure_disk_swap() {
-  local zram_device
-
-  info "Configuring the 16 GB disk swap: $SWAP_FILE"
-  if systemctl list-unit-files nvzramconfig.service --no-legend 2>/dev/null | grep -q .; then
-    run_sudo systemctl disable --now nvzramconfig.service
-  fi
-  while IFS= read -r zram_device; do
-    [[ -n "$zram_device" ]] || continue
-    run_sudo swapoff "$zram_device"
-  done < <(swapon --show=NAME --noheadings 2>/dev/null | awk '$1 ~ /^\/dev\/zram/ { print $1 }')
-
-  if [[ ! -f "$SWAP_FILE" ]]; then
-    run_sudo fallocate -l 16G "$SWAP_FILE"
-    run_sudo chmod 600 "$SWAP_FILE"
-    run_sudo mkswap "$SWAP_FILE"
-  elif ! run_sudo file "$SWAP_FILE" | grep -qi 'swap file'; then
-    die "$SWAP_FILE exists but is not a swap file; refusing to overwrite it."
-  fi
-  if ! swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$SWAP_FILE"; then
-    run_sudo swapon "$SWAP_FILE"
-  fi
-  if ! grep -Eq "^[[:space:]]*${SWAP_FILE//\//\\/}[[:space:]]+none[[:space:]]+swap[[:space:]]" /etc/fstab; then
-    printf '%s\n' "$SWAP_FILE  none  swap  sw  0  0" | run_sudo tee -a /etc/fstab >/dev/null
-  fi
-  info "NVIDIA zram is disabled and the 16 GB disk swap is active."
 }
 
 verify_runtime() {
@@ -327,6 +298,23 @@ switch_to_runlevel_3() {
   systemctl is-active --quiet docker.service || die "Docker service is not active after sudo init 3."
   docker info >/dev/null 2>&1 || die "Docker is not usable after sudo init 3."
   pass "Runlevel 3 verified: desktop GUI stopped; SSH and Docker are active."
+}
+
+disable_swap_for_benchmark() {
+  ensure_sudo_auth
+  info "Turning off all swap for this benchmark run..."
+
+  if systemctl list-unit-files nvzramconfig.service --no-legend 2>/dev/null | grep -q .; then
+    run_sudo systemctl stop nvzramconfig.service
+  fi
+  if [[ -n "$(swapon --show=NAME --noheadings 2>/dev/null)" ]]; then
+    run_sudo swapoff -a
+  fi
+  if [[ -n "$(swapon --show=NAME --noheadings 2>/dev/null)" ]]; then
+    die "Swap is still active; refusing to start the no-swap benchmark."
+  fi
+
+  pass "No-swap mode verified: swapon reports no active swap devices."
 }
 
 ensure_jetson_containers() {
@@ -721,6 +709,7 @@ run_benchmark() {
   fi
 
   switch_to_runlevel_3
+  disable_swap_for_benchmark
   rm -f "$TEMP_PNG" "$MLC_CSV_DEST" "$PERFORMANCE_PNG"
   : > "$BENCHMARK_LOG"
   configure_maxn_super
